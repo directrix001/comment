@@ -1,0 +1,1342 @@
+import sys
+import os
+import re
+import calendar
+from typing import List, Tuple, Optional
+
+import numpy as np
+import pandas as pd
+
+from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QStandardItemModel, QStandardItem
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.formatting.rule import CellIsRule
+from openpyxl.utils import get_column_letter
+
+
+try:
+    import xlwings as xw
+except Exception:
+    xw = None
+
+# APP CONSTANTS / HELPERS
+
+APP_TITLE = "Finance Data Pipeline – Variance (v7.2) - PyQt6"
+MAPPING_PATH = os.path.join("backend", "mapping.xlsx")
+
+FULL_TO_ABBR = {m: calendar.month_abbr[i] for i, m in enumerate(calendar.month_name) if m}
+ABBR_SET = set(calendar.month_abbr[1:])  # {'Jan','Feb',...}
+
+# FY month order Apr..Mar
+MONTH_TO_FYNUM = {
+    "Apr": 1, "May": 2, "Jun": 3, "Jul": 4, "Aug": 5, "Sep": 6,
+    "Oct": 7, "Nov": 8, "Dec": 9, "Jan": 10, "Feb": 11, "Mar": 12
+}
+FY_NAMES = ["April","May","June","July","August","September","October","November","December","January","February","March"]
+FY_MONTH_OPTIONS = [f"{str(i+1).zfill(2)} - {FY_NAMES[i]}" for i in range(12)]
+
+MONTH_HEADER_REGEX = r"\d{1,2}-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+
+
+def normalize_month_header(col) -> str:
+    """Normalize header to canonical 'd-Mmm' (e.g., '1-Apr')."""
+    if hasattr(col, "strftime"):
+        return f"{col.day}-{col.strftime('%b')}"
+
+    s = str(col).strip()
+
+    # '01 - April' / '01-April' / '01/April' / '01 April'
+    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]+)$", s)
+    if m:
+        d = int(m.group(1))
+        mon_txt = m.group(2).capitalize()
+        if mon_txt in FULL_TO_ABBR:
+            return f"{d}-{FULL_TO_ABBR[mon_txt]}"
+        if len(mon_txt) == 3 and mon_txt.title() in ABBR_SET:
+            return f"{d}-{mon_txt.title()}"
+
+    # '01 - Apr' / '1-Apr' / '1/Apr' / '1 Apr'
+    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]{3})$", s)
+    if m:
+        d = int(m.group(1))
+        mon_abbr = m.group(2).title()
+        return f"{d}-{mon_abbr}"
+
+    # Already canonical 'd-Mmm'
+    m = re.match(r"^0?(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$", s, re.IGNORECASE)
+    if m:
+        d = int(m.group(1))
+        mon_abbr = m.group(2).title()
+        return f"{d}-{mon_abbr}"
+
+    return s
+
+
+def normalize_dataframe_month_headers(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [normalize_month_header(c) for c in df.columns]
+    df2 = df.copy()
+    df2.columns = cols
+    return df2
+
+
+def compute_mtd_ytd(df: pd.DataFrame, fy_index: int) -> Tuple[pd.DataFrame, List[str], str]:
+    """Given df with normalized month headers, compute YTD and MTD for an FY index (1..12)."""
+    month_cols = [c for c in df.columns if re.fullmatch(MONTH_HEADER_REGEX, str(c))]
+    if not month_cols:
+        raise ValueError("No month columns found (expected '1-Apr' format).")
+
+    df_month_numeric = df[month_cols].apply(pd.to_numeric, errors="coerce")
+    df = df.copy()
+    df["YTD"] = df_month_numeric.sum(axis=1)
+
+    num_to_col = {}
+    for c in month_cols:
+        try:
+            _d, mon = str(c).split("-")
+        except ValueError:
+            continue
+        mon = mon.title()
+        if mon not in MONTH_TO_FYNUM:
+            continue
+        fy_num = MONTH_TO_FYNUM[mon]
+        num_to_col[fy_num] = c
+
+    if fy_index not in num_to_col:
+        raise ValueError(
+            f"Selected FY month {fy_index} not present in headers. Found FY months: {sorted(num_to_col.keys())}"
+        )
+
+    target_col = num_to_col[fy_index]
+    df["MTD"] = pd.to_numeric(df[target_col], errors="coerce")
+    return df, month_cols, target_col
+
+
+# Qt: Pandas Table Model (DB Generator preview)
+
+class PandasModel(QtCore.QAbstractTableModel):
+    def __init__(self, df: pd.DataFrame = pd.DataFrame(), parent=None):
+        super().__init__(parent)
+        self._df = df
+
+    def setDataFrame(self, df: pd.DataFrame):
+        self.beginResetModel()
+        self._df = df.copy()
+        self.endResetModel()
+
+    def rowCount(self, parent=None):
+        return 0 if self._df is None else len(self._df.index)
+
+    def columnCount(self, parent=None):
+        return 0 if self._df is None else len(self._df.columns)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or self._df is None:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            val = self._df.iat[index.row(), index.column()]
+            if isinstance(val, float):
+                return f"{val:,.2f}" if not np.isnan(val) else ""
+            return "" if pd.isna(val) else str(val)
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if self._df is None:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            if orientation == Qt.Orientation.Horizontal:
+                return str(self._df.columns[section])
+            else:
+                return str(self._df.index[section])
+        return None
+
+
+# Checkable + Reorderable List for Grouping
+
+class CheckableReorderableList(QtWidgets.QListWidget):
+    orderChanged = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.setAlternatingRowColors(True)
+
+    def dropEvent(self, e: QtGui.QDropEvent):
+        super().dropEvent(e)
+        self.orderChanged.emit()
+
+    def addOption(self, text: str, checked: bool = True):
+        it = QtWidgets.QListWidgetItem(text)
+        it.setFlags(
+            it.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self.addItem(it)
+
+    def setFromList(self, ordered_options: List[str], default_checked: set | None = None):
+        self.clear()
+        default_checked = default_checked or set()
+        for opt in ordered_options:
+            self.addOption(opt, checked=(opt in default_checked))
+
+    def checkedItems(self) -> List[str]:
+        return [
+            self.item(i).text()
+            for i in range(self.count())
+            if self.item(i).checkState() == Qt.CheckState.Checked
+        ]
+
+
+# Utilities
+
+def fill_list_widget(listw: QtWidgets.QListWidget, options: List[str], select_all: bool = True):
+    listw.clear()
+    for opt in options:
+        item = QtWidgets.QListWidgetItem(opt)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        item.setCheckState(Qt.CheckState.Checked if select_all else Qt.CheckState.Unchecked)
+        listw.addItem(item)
+
+def selected_items(listw: QtWidgets.QListWidget) -> List[str]:
+    vals = []
+    for i in range(listw.count()):
+        it = listw.item(i)
+        if it.checkState() == Qt.CheckState.Checked:
+            vals.append(it.text())
+    return vals
+
+
+
+# Main Application Window
+
+class FinanceApp(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(APP_TITLE)
+        self.resize(1350, 800)
+
+        # Data state
+        self.mapping_df: Optional[pd.DataFrame] = None
+        self.final_db: Optional[pd.DataFrame] = None
+        self.master_df: Optional[pd.DataFrame] = None
+        self.leaf_df: Optional[pd.DataFrame] = None
+
+        # NEW: source for native pivot (long format)
+        self.pivot_source_long: Optional[pd.DataFrame] = None
+
+        # UI
+        self.tabs = QtWidgets.QTabWidget(self)
+        self.setCentralWidget(self.tabs)
+
+        self.db_tab = QtWidgets.QWidget()
+        self.var_tab = QtWidgets.QWidget()
+        self.tabs.addTab(self.db_tab, "🔧 DB Generator")
+        self.tabs.addTab(self.var_tab, "📈 Variance Analysis")
+
+        self._setup_db_tab()
+        self._setup_var_tab()
+
+        self._load_mapping()
+
+
+    # Tab 1: DB Generator
+
+    def _setup_db_tab(self):
+        layout = QtWidgets.QVBoxLayout(self.db_tab)
+
+        top_box = QtWidgets.QGroupBox("Step 1 – Upload Monthly Excel and Generate Master DB")
+        top_layout = QtWidgets.QGridLayout(top_box)
+
+        self.btn_open_monthly = QtWidgets.QPushButton("Open Monthly Excel (.xlsx)")
+        self.lbl_monthly_path = QtWidgets.QLabel("No file selected")
+        self.cmb_fy_month = QtWidgets.QComboBox()
+        self.cmb_fy_month.addItems(FY_MONTH_OPTIONS)
+        self.btn_process = QtWidgets.QPushButton("Process & Generate Master DB")
+
+        row = 0
+        top_layout.addWidget(self.btn_open_monthly, row, 0)
+        top_layout.addWidget(self.lbl_monthly_path, row, 1, 1, 3)
+        row += 1
+        top_layout.addWidget(QtWidgets.QLabel("Select FY Month (Apr–Mar):"), row, 0)
+        top_layout.addWidget(self.cmb_fy_month, row, 1)
+        top_layout.addWidget(self.btn_process, row, 2)
+
+        # Preview
+        self.table_db = QtWidgets.QTableView()
+        self.db_model = PandasModel(pd.DataFrame())
+        self.table_db.setModel(self.db_model)
+        self.table_db.setAlternatingRowColors(True)
+        self.table_db.horizontalHeader().setStretchLastSection(True)
+        self.table_db.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.table_db.verticalHeader().setVisible(False)
+        self.table_db.setWordWrap(False)
+
+        # Buttons
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_save_csv = QtWidgets.QPushButton("📥 Save CSV")
+        self.btn_save_xlsx = QtWidgets.QPushButton("📥 Save Excel")
+        self.btn_send_to_var = QtWidgets.QPushButton("➡️ Use this as input for Variance Analysis")
+        self.btn_save_csv.setEnabled(False)
+        self.btn_save_xlsx.setEnabled(False)
+        self.btn_send_to_var.setEnabled(False)
+        btn_row.addWidget(self.btn_save_csv)
+        btn_row.addWidget(self.btn_save_xlsx)
+        btn_row.addWidget(self.btn_send_to_var)
+        btn_row.addStretch()
+
+        layout.addWidget(top_box)
+        layout.addWidget(self.table_db)
+        layout.addLayout(btn_row)
+
+        # Signals
+        self.btn_open_monthly.clicked.connect(self._on_open_monthly)
+        self.btn_process.clicked.connect(self._on_process_db)
+        self.btn_save_csv.clicked.connect(self._on_save_csv)
+        self.btn_save_xlsx.clicked.connect(self._on_save_excel)
+        self.btn_send_to_var.clicked.connect(self._on_send_to_variance)
+
+    def _load_mapping(self):
+        if os.path.exists(MAPPING_PATH):
+            try:
+                self.mapping_df = pd.read_excel(MAPPING_PATH, engine="openpyxl")
+                self.statusBar().showMessage(f"Loaded mapping: {MAPPING_PATH}")
+            except Exception as e:
+                self.mapping_df = None
+                QtWidgets.QMessageBox.warning(self, "Mapping Load", f"Could not load mapping from {MAPPING_PATH}.\nError: {e}")
+        else:
+            self.mapping_df = None
+            self.statusBar().showMessage("Mapping file not found; continuing without mapping.")
+
+    def _on_open_monthly(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Monthly Excel", "", "Excel Files (*.xlsx)")
+        if path:
+            self.lbl_monthly_path.setText(path)
+
+    def _on_process_db(self):
+        path = self.lbl_monthly_path.text()
+        if not path or not os.path.isfile(path):
+            QtWidgets.QMessageBox.warning(self, "Missing File", "Please select a valid monthly Excel file.")
+            return
+        try:
+            raw = pd.read_excel(path, engine="openpyxl")
+            df = normalize_dataframe_month_headers(raw)
+
+            month_cols = [c for c in df.columns if re.fullmatch(MONTH_HEADER_REGEX, str(c))]
+            if not month_cols:
+                QtWidgets.QMessageBox.critical(self, "No Month Columns",
+                                               "No month columns found like '1-Apr', '2-May', ... (after normalization).")
+                return
+
+            selected = self.cmb_fy_month.currentText()
+            fy_index = int(selected.split("-")[0].strip())
+            df2, month_cols, target_col = compute_mtd_ytd(df, fy_index)
+
+            # Merge mapping
+            if self.mapping_df is not None:
+                df_map = self.mapping_df
+                required_map_cols1 = {"Entity_desc","Region","Entity","Market"}
+                required_map_cols2 = {"CostCat description","OH/LC"}
+                if not required_map_cols1.issubset(df_map.columns) or not required_map_cols2.issubset(df_map.columns):
+                    QtWidgets.QMessageBox.critical(
+                        self, "Mapping Error",
+                        "Mapping file missing required columns. Needs: Entity_desc, Region, Entity, Market, CostCat description, OH/LC"
+                    )
+                    return
+                df_final = df2.merge(
+                    df_map[["Entity_desc","Region","Entity","Market"]],
+                    on="Entity_desc", how="left"
+                ).merge(
+                    df_map[["CostCat description","OH/LC"]],
+                    on="CostCat description", how="left"
+                )
+            else:
+                df_final = df2.copy()
+
+            self.final_db = df_final
+            self.db_model.setDataFrame(df_final.head(100))
+            self.btn_save_csv.setEnabled(True)
+            self.btn_save_xlsx.setEnabled(True)
+            self.btn_send_to_var.setEnabled(True)
+            QtWidgets.QMessageBox.information(self, "Success", "Transformation complete. Preview shows top 100 rows.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Processing Error", str(e))
+
+    def _on_save_csv(self):
+        if self.final_db is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save CSV", "final_db.csv", "CSV Files (*.csv)")
+        if path:
+            try:
+                self.final_db.to_csv(path, index=False)
+                QtWidgets.QMessageBox.information(self, "Saved", f"CSV saved to:\n{path}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Save Error", str(e))
+
+    def _on_save_excel(self):
+        if self.final_db is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Excel", "final_db.xlsx", "Excel Files (*.xlsx)")
+        if path:
+            try:
+                with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                    self.final_db.to_excel(writer, index=False, sheet_name="final_db")
+                QtWidgets.QMessageBox.information(self, "Saved", f"Excel saved to:\n{path}")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Save Error", str(e))
+
+    def _on_send_to_variance(self):
+        if self.final_db is None:
+            QtWidgets.QMessageBox.warning(self, "No Data", "Generate the Master DB first.")
+            return
+        self.tabs.setCurrentWidget(self.var_tab)
+        self.cmb_src_mode.setCurrentIndex(0)
+        self._use_generated_in_variance()
+
+
+    # Pivot formatting helpers
+
+    def _fmt_num(self, x):
+        if pd.isna(x):
+            return ""
+        try:
+            return f"{float(x):,.2f}"
+        except Exception:
+            return str(x)
+
+    def _fmt_pct(self, x):
+        if pd.isna(x):
+            return ""
+        try:
+            return f"{float(x) * 100:,.2f}%"
+        except Exception:
+            return str(x)
+
+    def _make_items_row(self, values, bold=False):
+        items = []
+        for v in values:
+            it = QStandardItem("" if v is None else (v if isinstance(v, str) else str(v)))
+            it.setEditable(False)
+            if bold:
+                f = it.font()
+                f.setBold(True)
+                it.setFont(f)
+            items.append(it)
+        return items
+
+
+    # Pivot-like UI tree model (NO REPEATED LABELS, NO LAST-LEVEL DUP SUBTOTAL)
+
+    def _build_pivot_tree_model(self, df_leaf: pd.DataFrame, group_cols: list, header_a: str, header_b: str):
+        """
+        QTreeView pivot-like:
+        - Grand total at top
+        - For each group level (except last), show a node row with subtotal numbers
+        - Last level are leaf rows (details)
+        - Parent labels do not repeat on children rows (we blank parent columns)
+        """
+        model = QStandardItemModel(self)
+        headers = group_cols + [header_a, header_b, "Δ (A-B)", "Δ% vs B"]
+        model.setHorizontalHeaderLabels(headers)
+
+        if df_leaf is None or df_leaf.empty:
+            return model
+
+        df_sorted = df_leaf.sort_values(group_cols).reset_index(drop=True)
+
+        # grand total
+        A_tot = float(df_sorted["A"].sum())
+        B_tot = float(df_sorted["B"].sum())
+        D_tot = A_tot - B_tot
+        P_tot = (D_tot / B_tot) if B_tot != 0 else np.nan
+
+        root = model.invisibleRootItem()
+
+        grand_labels = [""] * len(group_cols)
+        if group_cols:
+            grand_labels[0] = "GRAND TOTAL"
+        grand_items = self._make_items_row(
+            grand_labels + [self._fmt_num(A_tot), self._fmt_num(B_tot), self._fmt_num(D_tot), self._fmt_pct(P_tot)],
+            bold=True
+        )
+        root.appendRow(grand_items)
+        grand_node = grand_items[0]
+
+        # If only one group col, there is no "higher level" parent; leaf = that col
+        if len(group_cols) == 1:
+            last_col = group_cols[0]
+            for val in df_sorted[last_col].astype(str).fillna("").unique():
+                part = df_sorted[df_sorted[last_col].astype(str).fillna("") == val]
+                a = float(part["A"].sum()); b = float(part["B"].sum())
+                d = a - b; p = (d / b) if b != 0 else np.nan
+                row_labels = [val]  # only col
+                leaf_items = self._make_items_row(
+                    row_labels + [self._fmt_num(a), self._fmt_num(b), self._fmt_num(d), self._fmt_pct(p)],
+                    bold=False
+                )
+                grand_node.appendRow(leaf_items)
+            return model
+
+        # Node lookup per level
+        node_lookup = {}  # (level, key_tuple) -> QStandardItem
+
+        def subtotal_for(part: pd.DataFrame):
+            a = float(part["A"].sum()); b = float(part["B"].sum())
+            d = a - b; p = (d / b) if b != 0 else np.nan
+            return a, b, d, p
+
+        # Create group node rows for levels 1..(n-1); last level is leaf details
+        def get_or_create_group_node(parent_item: QStandardItem, level: int, key_tuple: tuple):
+            """
+            level: 1..(n-1)
+            key_tuple: group_cols[:level] values
+            """
+            if (level, key_tuple) in node_lookup:
+                return node_lookup[(level, key_tuple)]
+
+            # Filter df for subtotal
+            part = df_sorted.copy()
+            for i, col in enumerate(group_cols[:level]):
+                part = part[part[col].astype(str).fillna("") == key_tuple[i]]
+
+            a, b, d, p = subtotal_for(part)
+
+            # Pivot-like: only show label in THIS level column; blanks elsewhere
+            labels = [""] * len(group_cols)
+            labels[level - 1] = key_tuple[-1]
+
+            items = self._make_items_row(
+                labels + [self._fmt_num(a), self._fmt_num(b), self._fmt_num(d), self._fmt_pct(p)],
+                bold=True
+            )
+            parent_item.appendRow(items)
+            node_item = items[0]
+            node_lookup[(level, key_tuple)] = node_item
+            return node_item
+
+        # Build hierarchy
+        for _, r in df_sorted.iterrows():
+            # traverse group cols except last
+            parent = grand_node
+            key_accum = []
+            for level, col in enumerate(group_cols[:-1], start=1):
+                v = "" if pd.isna(r[col]) else str(r[col])
+                key_accum.append(v)
+                parent = get_or_create_group_node(parent, level, tuple(key_accum))
+
+            # leaf (last col)
+            last_col = group_cols[-1]
+            lv = "" if pd.isna(r[last_col]) else str(r[last_col])
+            # Pivot-like: only last column filled at leaf line
+            labels = [""] * len(group_cols)
+            labels[-1] = lv
+
+            a = float(r["A"]); b = float(r["B"])
+            d = float(r["Δ (A-B)"]); p = r["Δ% vs B"]
+
+            leaf_items = self._make_items_row(
+                labels + [self._fmt_num(a), self._fmt_num(b), self._fmt_num(d), self._fmt_pct(p)],
+                bold=False
+            )
+            parent.appendRow(leaf_items)
+
+        return model
+
+    def _set_pivot_view(self, df_leaf, group_fields, header_a, header_b):
+        self.pivot_model = self._build_pivot_tree_model(df_leaf, group_fields, header_a, header_b)
+        self.table_var.setModel(self.pivot_model)
+        self.table_var.expandToDepth(1)  # show first group level expanded
+
+
+    # Tab 2: Variance Analysis (UI)
+
+    def _setup_var_tab(self):
+        layout = QtWidgets.QVBoxLayout(self.var_tab)
+
+        # Source mode
+        src_row = QtWidgets.QHBoxLayout()
+        src_row.addWidget(QtWidgets.QLabel("Data Source:"))
+        self.cmb_src_mode = QtWidgets.QComboBox()
+        self.cmb_src_mode.addItems([
+            "Use Generated Output (from DB Generator)",
+            "Upload Master DB (single file, contains both scenarios)",
+            "Upload Two Files (A & B, assign scenario labels)"
+        ])
+        src_row.addWidget(self.cmb_src_mode)
+        src_row.addStretch()
+
+        # Mode-specific panels
+        self.panel_use_generated = QtWidgets.QWidget()
+        gen_layout = QtWidgets.QHBoxLayout(self.panel_use_generated)
+        self.lbl_using_generated = QtWidgets.QLabel("No generated output found yet.")
+        gen_layout.addWidget(self.lbl_using_generated)
+
+        self.panel_single_master = QtWidgets.QWidget()
+        sm_layout = QtWidgets.QHBoxLayout(self.panel_single_master)
+        self.btn_open_master = QtWidgets.QPushButton("Open Master DB (.xlsx)")
+        self.lbl_master_path = QtWidgets.QLabel("No file selected")
+        sm_layout.addWidget(self.btn_open_master)
+        sm_layout.addWidget(self.lbl_master_path)
+
+        self.panel_two_files = QtWidgets.QWidget()
+        tf_layout = QtWidgets.QGridLayout(self.panel_two_files)
+        self.btn_open_A = QtWidgets.QPushButton("Open File for Scenario A (.xlsx)")
+        self.btn_open_B = QtWidgets.QPushButton("Open File for Scenario B (.xlsx)")
+        self.lbl_path_A = QtWidgets.QLabel("Not selected")
+        self.lbl_path_B = QtWidgets.QLabel("Not selected")
+        self.txt_label_A = QtWidgets.QLineEdit("Scenario_A")
+        self.txt_label_B = QtWidgets.QLineEdit("Scenario_B")
+        tf_layout.addWidget(self.btn_open_A, 0, 0); tf_layout.addWidget(self.lbl_path_A, 0, 1)
+        tf_layout.addWidget(QtWidgets.QLabel("Scenario A label:"), 1, 0); tf_layout.addWidget(self.txt_label_A, 1, 1)
+        tf_layout.addWidget(self.btn_open_B, 2, 0); tf_layout.addWidget(self.lbl_path_B, 2, 1)
+        tf_layout.addWidget(QtWidgets.QLabel("Scenario B label:"), 3, 0); tf_layout.addWidget(self.txt_label_B, 3, 1)
+
+        # Filters
+        flt_box = QtWidgets.QGroupBox("Filters & Selections")
+        flt_grid = QtWidgets.QGridLayout(flt_box)
+        self.cmb_period = QtWidgets.QComboBox()
+
+        self.list_market = QtWidgets.QListWidget(); self.list_market.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        self.list_region = QtWidgets.QListWidget(); self.list_region.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        self.list_division = QtWidgets.QListWidget(); self.list_division.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+
+        self.cmb_scen_A = QtWidgets.QComboBox()
+        self.cmb_scen_B = QtWidgets.QComboBox()
+        self.rb_costs = QtWidgets.QRadioButton("A < B (costs)")
+        self.rb_revenue = QtWidgets.QRadioButton("A > B (revenue)")
+        self.rb_costs.setChecked(True)
+
+        # Grouping list
+        self.list_group = CheckableReorderableList(self)
+        self.chk_include_geo = QtWidgets.QCheckBox("Include Market and Region at the top")
+        self.btn_reset_group = QtWidgets.QPushButton("Reset grouping to default order")
+        hint = QtWidgets.QLabel("Tip: ✓ to include a level, drag to reorder. Top = highest level.")
+        hint.setStyleSheet("color: gray;")
+
+        r = 0
+        flt_grid.addWidget(QtWidgets.QLabel("Period:"), r, 0); flt_grid.addWidget(self.cmb_period, r, 1); r += 1
+        flt_grid.addWidget(QtWidgets.QLabel("Market (multi-select):"), r, 0); flt_grid.addWidget(self.list_market, r, 1); r += 1
+        flt_grid.addWidget(QtWidgets.QLabel("Region (multi-select):"), r, 0); flt_grid.addWidget(self.list_region, r, 1); r += 1
+        flt_grid.addWidget(QtWidgets.QLabel("Division_Desc (multi-select):"), r, 0); flt_grid.addWidget(self.list_division, r, 1); r += 1
+        flt_grid.addWidget(QtWidgets.QLabel("Scenario A:"), r, 0); flt_grid.addWidget(self.cmb_scen_A, r, 1); r += 1
+        flt_grid.addWidget(QtWidgets.QLabel("Scenario B:"), r, 0); flt_grid.addWidget(self.cmb_scen_B, r, 1); r += 1
+
+        flt_grid.addWidget(QtWidgets.QLabel("Favorable when:"), r, 0)
+        fav_row = QtWidgets.QHBoxLayout()
+        fav_row.addWidget(self.rb_costs); fav_row.addWidget(self.rb_revenue); fav_row.addStretch()
+        fav_widget = QtWidgets.QWidget(); fav_widget.setLayout(fav_row)
+        flt_grid.addWidget(fav_widget, r, 1); r += 1
+
+        flt_grid.addWidget(QtWidgets.QLabel("Pivot Row Fields (top = highest):"), r, 0)
+        flt_grid.addWidget(self.list_group, r, 1); r += 1
+        flt_grid.addWidget(self.chk_include_geo, r, 1); r += 1
+        flt_grid.addWidget(self.btn_reset_group, r, 1); r += 1
+        flt_grid.addWidget(hint, r, 1); r += 1
+
+        # Actions
+        act_row = QtWidgets.QHBoxLayout()
+        self.btn_prepare_from_source = QtWidgets.QPushButton("Load / Refresh Source")
+        self.btn_export_master = QtWidgets.QPushButton("📥 Export Master DB (Excel)")
+        self.btn_export_master.setEnabled(False)
+        self.btn_run_variance = QtWidgets.QPushButton("Run Variance")
+        self.btn_export_excel = QtWidgets.QPushButton("📥 Export Variance Report (Excel)")
+        self.btn_run_variance.setEnabled(False)
+        self.btn_export_excel.setEnabled(False)
+        act_row.addWidget(self.btn_prepare_from_source)
+        act_row.addWidget(self.btn_export_master)
+        act_row.addWidget(self.btn_run_variance)
+        act_row.addWidget(self.btn_export_excel)
+        act_row.addStretch()
+
+        # Pivot Preview (Tree)
+        self.table_var = QtWidgets.QTreeView()
+        self.pivot_model = QStandardItemModel(self)
+        self.table_var.setModel(self.pivot_model)
+        self.table_var.setAlternatingRowColors(True)
+        self.table_var.setRootIsDecorated(True)
+        self.table_var.setItemsExpandable(True)
+        self.table_var.setExpandsOnDoubleClick(True)
+        self.table_var.setWordWrap(False)
+        self.table_var.header().setStretchLastSection(True)
+        self.table_var.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+
+        # Splitter layout
+        layout.addLayout(src_row)
+        layout.addWidget(self.panel_use_generated)
+        layout.addWidget(self.panel_single_master)
+        layout.addWidget(self.panel_two_files)
+
+        splitter = QtWidgets.QSplitter(Qt.Orientation.Horizontal)
+        left_panel = QtWidgets.QWidget()
+        left_v = QtWidgets.QVBoxLayout(left_panel)
+        left_v.setContentsMargins(0, 0, 0, 0)
+        left_v.addWidget(flt_box)
+        left_v.addLayout(act_row)
+        left_v.addStretch()
+
+        right_panel = QtWidgets.QWidget()
+        right_v = QtWidgets.QVBoxLayout(right_panel)
+        right_v.setContentsMargins(0, 0, 0, 0)
+
+        zoom_row = QtWidgets.QHBoxLayout()
+        zoom_row.addStretch()
+        zoom_row.addWidget(QtWidgets.QLabel("Zoom:"))
+        self.zoom_slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setMinimum(90)
+        self.zoom_slider.setMaximum(130)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setFixedWidth(140)
+        zoom_row.addWidget(self.zoom_slider)
+        right_v.addLayout(zoom_row)
+        right_v.addWidget(self.table_var)
+
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([380, 1000])
+
+        layout.addWidget(splitter)
+
+        # Signals
+        self.cmb_src_mode.currentIndexChanged.connect(self._on_src_mode_changed)
+        self.btn_open_master.clicked.connect(self._on_open_master)
+        self.btn_open_A.clicked.connect(self._on_open_A)
+        self.btn_open_B.clicked.connect(self._on_open_B)
+        self.btn_prepare_from_source.clicked.connect(self._prepare_source)
+        self.btn_run_variance.clicked.connect(self._run_variance)
+        self.btn_export_excel.clicked.connect(self._export_variance)
+        self.btn_export_master.clicked.connect(self._export_master_db)
+        self.btn_reset_group.clicked.connect(self._on_reset_grouping)
+        self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
+
+        self._on_src_mode_changed(0)
+
+    def _on_zoom_changed(self, value: int):
+        base_pt = 10
+        scale = value / 100.0
+        font = self.table_var.font()
+        font.setPointSizeF(base_pt * scale)
+        self.table_var.setFont(font)
+
+        hfont = self.table_var.header().font()
+        hfont.setPointSizeF((base_pt + 1) * scale)
+        self.table_var.header().setFont(hfont)
+
+    def _on_src_mode_changed(self, idx: int):
+        self.panel_use_generated.setVisible(idx == 0)
+        self.panel_single_master.setVisible(idx == 1)
+        self.panel_two_files.setVisible(idx == 2)
+        if idx == 0:
+            self._use_generated_in_variance()
+
+    def _use_generated_in_variance(self):
+        if self.final_db is None:
+            self.lbl_using_generated.setText(
+                "No generated output found. Go to 'DB Generator' tab and process a file, then click 'Use this as input'."
+            )
+            self.master_df = None
+            self.btn_run_variance.setEnabled(False)
+            self.btn_export_master.setEnabled(False)
+        else:
+            self.lbl_using_generated.setText("Using generated output as source.")
+            self.master_df = normalize_dataframe_month_headers(self.final_db)
+            if "Scenario" not in self.master_df.columns:
+                QtWidgets.QMessageBox.information(
+                    self, "Scenario Column Missing",
+                    "Your generated data has no 'Scenario' column. Use 'Upload Two Files (A & B, assign scenario labels)'."
+                )
+            self._populate_filters()
+            self.btn_run_variance.setEnabled(True)
+            self.btn_export_master.setEnabled(True)
+
+    def _on_open_master(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Master DB (.xlsx)", "", "Excel Files (*.xlsx)")
+        if path:
+            self.lbl_master_path.setText(path)
+
+    def _on_open_A(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open File for Scenario A", "", "Excel Files (*.xlsx)")
+        if path:
+            self.lbl_path_A.setText(path)
+
+    def _on_open_B(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open File for Scenario B", "", "Excel Files (*.xlsx)")
+        if path:
+            self.lbl_path_B.setText(path)
+
+    def _prepare_source(self):
+        mode = self.cmb_src_mode.currentIndex()
+        try:
+            if mode == 0:
+                self._use_generated_in_variance()
+            elif mode == 1:
+                path = self.lbl_master_path.text()
+                if not path or not os.path.isfile(path):
+                    QtWidgets.QMessageBox.warning(self, "Missing File", "Please select a Master DB file.")
+                    return
+                df = pd.read_excel(path, engine="openpyxl")
+                self.master_df = normalize_dataframe_month_headers(df)
+                self._populate_filters()
+                self.btn_run_variance.setEnabled(True)
+                self.btn_export_master.setEnabled(True)
+            else:
+                pathA = self.lbl_path_A.text()
+                pathB = self.lbl_path_B.text()
+                labA = self.txt_label_A.text().strip() or "Scenario_A"
+                labB = self.txt_label_B.text().strip() or "Scenario_B"
+                if not (os.path.isfile(pathA) and os.path.isfile(pathB)):
+                    QtWidgets.QMessageBox.warning(self, "Missing Files", "Please select valid files for Scenario A and B.")
+                    return
+                dfa = normalize_dataframe_month_headers(pd.read_excel(pathA, engine="openpyxl"))
+                dfb = normalize_dataframe_month_headers(pd.read_excel(pathB, engine="openpyxl"))
+                dfa = dfa.copy(); dfa["Scenario"] = labA
+                dfb = dfb.copy(); dfb["Scenario"] = labB
+                common_cols = list(set(dfa.columns).intersection(set(dfb.columns)))
+                self.master_df = pd.concat([dfa[common_cols], dfb[common_cols]], ignore_index=True)
+                self._populate_filters()
+                self.btn_run_variance.setEnabled(True)
+                self.btn_export_master.setEnabled(True)
+
+            QtWidgets.QMessageBox.information(self, "Source Ready", "Source loaded. Set filters and click 'Run Variance'.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Prepare Source Error", str(e))
+
+    def _populate_filters(self):
+        if self.master_df is None:
+            return
+        df = self.master_df
+
+        # Period options
+        month_cols = [c for c in df.columns if re.fullmatch(MONTH_HEADER_REGEX, str(c))]
+        period_cols = sorted(set(month_cols + [c for c in ["YTD","MTD"] if c in df.columns]),
+                             key=lambda c: (100 if c in ("YTD","MTD") else 0, c))
+        self.cmb_period.clear()
+        self.cmb_period.addItems(period_cols)
+
+        # Market / Region / Division_Desc
+        markets = sorted(df.get('Market', pd.Series([], dtype=str)).astype(str).dropna().unique().tolist())
+        regions = sorted(df.get('Region', pd.Series([], dtype=str)).astype(str).dropna().unique().tolist())
+        divisions = sorted(df['Division_Desc'].astype(str).dropna().unique().tolist()) if 'Division_Desc' in df.columns else []
+
+        fill_list_widget(self.list_market, markets, select_all=True)
+        fill_list_widget(self.list_region, regions, select_all=True)
+        fill_list_widget(self.list_division, divisions, select_all=True)
+
+        # Scenarios
+        scenarios = sorted(df.get('Scenario', pd.Series([], dtype=str)).astype(str).dropna().unique().tolist())
+        self.cmb_scen_A.clear(); self.cmb_scen_B.clear()
+        self.cmb_scen_A.addItems(scenarios)
+        self.cmb_scen_B.addItems(scenarios)
+        if len(scenarios) >= 2:
+            self.cmb_scen_B.setCurrentIndex(1)
+
+        # Grouping hierarchy (pivot row fields)
+        full_pref_order = ['OH/LC', 'CostCat description', 'Division_Desc', 'Function_Desc', 'Departement_desc', 'Entity_desc']
+        ordered = [k for k in full_pref_order if k in df.columns]
+        default_checked = set([k for k in ['OH/LC', 'Division_Desc', 'Function_Desc'] if k in ordered])
+        self.list_group.setFromList(ordered, default_checked=default_checked)
+
+        # Clear previous output
+        self.pivot_model = QStandardItemModel(self)
+        self.table_var.setModel(self.pivot_model)
+        self.btn_export_excel.setEnabled(False)
+
+    def _on_reset_grouping(self):
+        if self.master_df is None:
+            return
+        df = self.master_df
+        full_pref_order = ['OH/LC', 'CostCat description', 'Division_Desc', 'Function_Desc', 'Departement_desc', 'Entity_desc']
+        ordered = [k for k in full_pref_order if k in df.columns]
+        default_checked = set([k for k in ['OH/LC', 'Division_Desc', 'Function_Desc'] if k in ordered])
+        self.list_group.setFromList(ordered, default_checked=default_checked)
+
+    # Run Variance (numeric fix + pivot math)
+
+    def _run_variance(self):
+        if self.master_df is None:
+            QtWidgets.QMessageBox.warning(self, "No Data", "Load a source first.")
+            return
+
+        df = self.master_df.copy()
+
+        sel_period = self.cmb_period.currentText()
+        sel_markets = selected_items(self.list_market)
+        sel_regions = selected_items(self.list_region)
+        sel_divisions = selected_items(self.list_division)
+        scenario_a = self.cmb_scen_A.currentText()
+        scenario_b = self.cmb_scen_B.currentText()
+        favorable_is_lower = self.rb_costs.isChecked()
+
+        group_fields = self.list_group.checkedItems()
+        if self.chk_include_geo.isChecked():
+            for geo in ['Market', 'Region']:
+                if geo in df.columns and geo not in group_fields:
+                    group_fields.insert(0, geo)
+
+        if not group_fields:
+            QtWidgets.QMessageBox.information(self, "Grouping Required", "Select at least one pivot row field.")
+            return
+
+        if sel_period not in df.columns:
+            QtWidgets.QMessageBox.critical(self, "Missing Column", f"Selected period '{sel_period}' not in data.")
+            return
+        if 'Scenario' not in df.columns:
+            QtWidgets.QMessageBox.critical(self, "Missing Column", "Data must contain a 'Scenario' column.")
+            return
+
+        # Clean Scenario values
+        df["Scenario"] = df["Scenario"].astype(str).str.strip()
+
+        # Filters
+        if sel_markets:
+            df = df[df.get('Market', '').astype(str).isin(sel_markets)]
+        if sel_regions:
+            df = df[df.get('Region', '').astype(str).isin(sel_regions)]
+        if 'Division_Desc' in df.columns and sel_divisions:
+            df = df[df['Division_Desc'].astype(str).isin(sel_divisions)]
+
+        df = df[df['Scenario'].astype(str).isin([scenario_a, scenario_b])]
+
+        use_cols = group_fields + ['Scenario', sel_period]
+        missing = [c for c in use_cols if c not in df.columns]
+        if missing:
+            QtWidgets.QMessageBox.critical(self, "Missing Columns", f"Required columns missing: {missing}")
+            return
+
+        base = df[use_cols].rename(columns={sel_period: 'Value'}).copy()
+
+        # --- CRITICAL numeric fix ---
+        val = base["Value"].astype(str).str.strip()
+        val = val.str.replace(r"^\((.*)\)$", r"-\1", regex=True)  # (123) -> -123
+        val = val.str.replace(",", "", regex=False)              # remove commas
+        base["Value"] = pd.to_numeric(val, errors="coerce").fillna(0.0)
+
+        # Aggregate & pivot by Scenario
+        agg = base.groupby(group_fields + ['Scenario'], dropna=False)['Value'].sum().reset_index()
+
+        # NEW: Keep long-format pivot source for Native Pivot export (NO logic change)
+        self.pivot_source_long = agg.copy()
+
+        piv = agg.pivot_table(index=group_fields, columns='Scenario', values='Value', aggfunc='sum', fill_value=0.0)
+
+        for s in [scenario_a, scenario_b]:
+            if s not in piv.columns:
+                piv[s] = 0.0
+
+        piv = piv[[scenario_a, scenario_b]].rename(columns={scenario_a: 'A', scenario_b: 'B'})
+
+        leaf_df = piv.reset_index()
+        leaf_df['Δ (A-B)'] = leaf_df['A'] - leaf_df['B']
+        leaf_df['Δ% vs B'] = np.where(leaf_df['B'] == 0, np.nan, leaf_df['Δ (A-B)'] / leaf_df['B'])
+
+        self.leaf_df = leaf_df
+
+        header_a = f"{scenario_a} (A)"
+        header_b = f"{scenario_b} (B)"
+
+        # Pivot UI preview (Excel-like label repetition behavior)
+        self._set_pivot_view(self.leaf_df, group_fields, header_a, header_b)
+
+        self.btn_export_excel.setEnabled(True)
+
+        self._var_context = {
+            'sel_period': sel_period,
+            'sel_markets': sel_markets,
+            'sel_regions': sel_regions,
+            'sel_divisions': sel_divisions,
+            'scenario_a': scenario_a,
+            'scenario_b': scenario_b,
+            'header_a': header_a,
+            'header_b': header_b,
+            'group_fields': group_fields,
+            'favorable_is_lower': favorable_is_lower
+        }
+
+        QtWidgets.QMessageBox.information(self, "Variance Ready",
+                                          f"Period: {sel_period} | Compare: {header_a} vs {header_b}")
+
+
+    # Export Master DB
+
+    def _export_master_db(self):
+        if self.master_df is None or self.master_df.empty:
+            QtWidgets.QMessageBox.warning(self, "Nothing to Export", "No master dataset is loaded.")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export Master DB", "master_db.xlsx", "Excel Files (*.xlsx)")
+        if not path:
+            return
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                self.master_df.to_excel(writer, index=False, sheet_name="master_db")
+            QtWidgets.QMessageBox.information(self, "Exported", f"Master DB saved to:\n{path}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Export Error", str(e))
+
+    # -------------------------
+    # Pivot (Outline) rows builder for Excel
+    # -------------------------
+    def _build_pivot_outline_rows(self, df_leaf: pd.DataFrame, group_cols: List[str]):
+        df_sorted = df_leaf.sort_values(group_cols).reset_index(drop=True)
+
+        rows = []   # list of dicts with group cols + metrics + _type + _level
+        spans = []  # list of (start_excel_row, end_excel_row, outline_level)
+
+        def sums(part):
+            a = float(part["A"].sum()); b = float(part["B"].sum())
+            d = a - b; p = (d / b) if b != 0 else np.nan
+            return a, b, d, p
+
+        # Grand total row at top
+        A_tot, B_tot, D_tot, P_tot = sums(df_sorted)
+        grand = {c: "" for c in group_cols}
+        grand[group_cols[0]] = "GRAND TOTAL"
+        grand.update({"A": A_tot, "B": B_tot, "Δ (A-B)": D_tot, "Δ% vs B": P_tot, "_type": "grand", "_level": 0})
+        rows.append(grand)
+
+        # If only 1 group col, just list details (no subtotals)
+        if len(group_cols) == 1:
+            col = group_cols[0]
+            for val in df_sorted[col].astype(str).fillna("").unique():
+                part = df_sorted[df_sorted[col].astype(str).fillna("") == val]
+                a, b, d, p = sums(part)
+                r = {c: "" for c in group_cols}
+                r[col] = val
+                r.update({"A": a, "B": b, "Δ (A-B)": d, "Δ% vs B": p, "_type": "detail", "_level": 1})
+                rows.append(r)
+            return rows, spans
+
+        # Recursion for group levels except last
+        def recurse(sub_df: pd.DataFrame, level: int):
+            """
+            level: 0..len(group_cols)-2 (because last column is detail)
+            """
+            col = group_cols[level]
+            next_is_last = (level == len(group_cols) - 2)
+            for val in sub_df[col].astype(str).fillna("").unique():
+                part = sub_df[sub_df[col].astype(str).fillna("") == val]
+
+                # Group header row (bold, label only)
+                hdr = {c: "" for c in group_cols}
+                hdr[col] = val
+                hdr.update({"A": None, "B": None, "Δ (A-B)": None, "Δ% vs B": None, "_type": "header", "_level": level + 1})
+                rows.append(hdr)
+
+                # Children start (for outline grouping)
+                child_start_idx = len(rows)
+
+                if next_is_last:
+                    # Details at last col (no subtotal at last col)
+                    last_col = group_cols[-1]
+                    for lv in part[last_col].astype(str).fillna("").unique():
+                        part2 = part[part[last_col].astype(str).fillna("") == lv]
+                        a, b, d, p = sums(part2)
+                        det = {c: "" for c in group_cols}
+                        det[last_col] = lv
+                        det.update({"A": a, "B": b, "Δ (A-B)": d, "Δ% vs B": p, "_type": "detail", "_level": level + 2})
+                        rows.append(det)
+                else:
+                    recurse(part, level + 1)
+
+                child_end_idx = len(rows) - 1
+
+                # Subtotal row for this group (bold, numbers) -> "<val> Total"
+                a, b, d, p = sums(part)
+                tot = {c: "" for c in group_cols}
+                tot[col] = f"{val} Total"
+                tot.update({"A": a, "B": b, "Δ (A-B)": d, "Δ% vs B": p, "_type": "subtotal", "_level": level + 1})
+                rows.append(tot)
+
+                # Outline span groups only the child rows (not subtotal)
+                # Excel row number = 2(header row) + row_index_in_rows_list (0-based)
+                if child_end_idx >= child_start_idx:
+                    start_excel = 2 + child_start_idx
+                    end_excel = 2 + child_end_idx
+                    spans.append((start_excel, end_excel, level + 1))
+
+        recurse(df_sorted, 0)
+        return rows, spans
+
+
+    # NEW: Create Excel Pivot using xlwings (field-wise collapsible)
+
+    def _create_native_pivot_xlwings(self, filepath: str, group_fields: list, scenario_a: str,scenario_b: str):
+        """
+        Creates a real Excel PivotTable using xlwings.
+        Source sheet must exist: PivotSource
+        Output sheet: Pivot (Native)
+
+        Row fields  : group_fields
+        Column field: Scenario
+        Values      : Sum(Value), Difference From scenario_b, % Difference From scenario_b
+        """
+        if xw is None:
+            raise RuntimeError("xlwings is not installed. Run: pip install xlwings")
+
+        app = xw.App(visible=False, add_book=False)
+        app.display_alerts = False
+        app.screen_updating = False
+
+        try:
+            wb = app.books.open(os.path.abspath(filepath))
+
+            ws_src = wb.sheets["PivotSource"]
+
+            # Create/clear Pivot (Native)
+            try:
+                ws_pv = wb.sheets["Pivot (Native)"]
+                ws_pv.clear()
+            except Exception:
+                ws_pv = wb.sheets.add("Pivot (Native)", after=ws_src)
+
+            # Determine actual used range in PivotSource
+            used = ws_src.used_range
+            last_row = used.last_cell.row
+            last_col = used.last_cell.column
+            src_range = ws_src.range((1, 1), (last_row, last_col))
+
+            # Create/replace an Excel Table (ListObject) named tblPivotSource
+            lo_name = "tblPivotSource"
+            for lo in ws_src.api.ListObjects:
+                if lo.Name == lo_name:
+                    lo.Delete()
+                    break
+
+            xlYes = 1
+            ws_src.api.ListObjects.Add(1, src_range.api, None, xlYes).Name = lo_name
+
+            # Excel pivot constants (avoid win32com dependency)
+            xlDatabase = 1
+            xlRowField = 1
+            xlColumnField = 2
+            xlSum = -4157
+            xlOutlineRow = 2
+            xlDifferenceFrom = 2
+            xlPercentDifferenceFrom = 4
+
+            pt_name = "ptVariance"
+
+            # Create PivotCache + PivotTable
+            pc = wb.api.PivotCaches().Create(SourceType=xlDatabase, SourceData=lo_name)
+            pt = pc.CreatePivotTable(TableDestination=ws_pv.range("A3").api, TableName=pt_name)
+
+            # Outline layout gives expand/collapse (+/-) per field level
+            pt.RowAxisLayout(xlOutlineRow)
+
+            # Row fields
+            for i, f in enumerate(group_fields, start=1):
+                pf = pt.PivotFields(f)
+                pf.Orientation = xlRowField
+                pf.Position = i
+
+            # Column field
+            pf_s = pt.PivotFields("Scenario")
+            pf_s.Orientation = xlColumnField
+            pf_s.Position = 1
+
+            # Values (ONLY ONCE)
+            pt.AddDataField(pt.PivotFields("Value"), "Amount", xlSum)
+
+            # --- ADD calculated item for Variance (A-B) ---
+            # This creates a new "Scenario" column called "Variance"
+            try:
+                formula = f"='{scenario_a}'-'{scenario_b}'"
+                pf_s.CalculatedItems().Add("Variance", formula)
+            except Exception:
+                # If already exists or Excel blocks it, ignore
+                pass
+
+            # Refresh + formatting
+            try:
+                pt.RefreshTable()
+            except Exception:
+                pass
+
+            ws_pv.autofit()
+
+            wb.save()
+            wb.close()
+
+        finally:
+            app.quit()
+
+    # Export Variance report (Pivot-style sheet replaces Grouped)
+
+    def _export_variance(self):
+        if self.leaf_df is None or not hasattr(self, "_var_context"):
+            QtWidgets.QMessageBox.warning(self, "Nothing to Export", "Run variance first.")
+            return
+
+        ctx = self._var_context
+        sel_month = ctx['sel_period']
+        sel_markets = ctx['sel_markets']
+        sel_regions = ctx['sel_regions']
+        sel_divisions = ctx['sel_divisions']
+        header_a = ctx['header_a']
+        header_b = ctx['header_b']
+        group_fields = ctx['group_fields']
+        favorable_is_lower = ctx['favorable_is_lower']
+        scenario_b = ctx['scenario_b']
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Variance Report", f"variance_report_{sel_month.replace('/', '-')}.xlsx",
+            "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+
+        try:
+            rows, spans = self._build_pivot_outline_rows(
+                self.leaf_df[group_fields + ['A','B','Δ (A-B)','Δ% vs B']], group_fields
+            )
+
+            with pd.ExcelWriter(path, engine='openpyxl') as writer:
+                # README
+                cover = pd.DataFrame({
+                    'Item': ['Period','Markets','Regions','Scenario A','Scenario B','Favorable when','Division_Desc filter'],
+                    'Value': [
+                        sel_month,
+                        ', '.join(sel_markets) if sel_markets else 'All',
+                        ', '.join(sel_regions) if sel_regions else 'All',
+                        header_a, header_b,
+                        'A < B (costs)' if favorable_is_lower else 'A > B (revenue)',
+                        ', '.join(sel_divisions) if sel_divisions else 'All'
+                    ]
+                })
+                cover.to_excel(writer, sheet_name='README', index=False)
+
+                # Flat (optional)
+                flat = self.leaf_df.rename(columns={'A': header_a, 'B': header_b})
+                flat_cols = group_fields + [header_a, header_b, 'Δ (A-B)', 'Δ% vs B']
+                flat[flat_cols].to_excel(writer, sheet_name='Variance (Flat)', index=False)
+
+                # NEW: PivotSource (long-format) for REAL Excel Pivot
+                # This does NOT change your variance logic; it uses the already computed agg table.
+                if self.pivot_source_long is not None and not self.pivot_source_long.empty:
+                    self.pivot_source_long.to_excel(writer, sheet_name="PivotSource", index=False)
+                else:
+                    # create sheet anyway so pivot step won't crash
+                    pd.DataFrame(columns=group_fields + ["Scenario", "Value"]).to_excel(writer, sheet_name="PivotSource", index=False)
+
+                # Pivot-style sheet (Outline)
+                sheet = "Pivot (Outline)"
+                cols = group_fields + [header_a, header_b, 'Δ (A-B)', 'Δ% vs B']
+                pd.DataFrame(columns=cols).to_excel(writer, sheet_name=sheet, index=False)
+                ws = writer.sheets[sheet]
+
+                bold = Font(bold=True)
+                fmt_num = '#,##0.00'
+                fmt_pct = '0.00%'
+
+                # Write rows
+                row_cursor = 2
+                for r in rows:
+                    typ = r.get("_type")
+                    lvl = int(r.get("_level", 0))
+
+                    # group cols
+                    for ci, col in enumerate(group_fields, start=1):
+                        v = r.get(col, "")
+                        c = ws.cell(row=row_cursor, column=ci, value=v)
+                        # indent first group column slightly
+                        if ci == 1 and typ in ("header", "subtotal"):
+                            c.alignment = Alignment(indent=max(0, lvl - 1))
+                        if typ in ("grand", "header", "subtotal"):
+                            c.font = bold
+
+                    # numeric cols
+                    colA = len(group_fields) + 1
+                    colB = len(group_fields) + 2
+                    colD = len(group_fields) + 3
+                    colP = len(group_fields) + 4
+
+                    vA = r.get("A")
+                    vB = r.get("B")
+                    vD = r.get("Δ (A-B)")
+                    vP = r.get("Δ% vs B")
+
+                    cA = ws.cell(row=row_cursor, column=colA, value=vA)
+                    cB = ws.cell(row=row_cursor, column=colB, value=vB)
+                    cD = ws.cell(row=row_cursor, column=colD, value=vD)
+                    cP = ws.cell(row=row_cursor, column=colP, value=vP)
+
+                    # formats
+                    cA.number_format = fmt_num
+                    cB.number_format = fmt_num
+                    cD.number_format = fmt_num
+                    cP.number_format = fmt_pct
+
+                    if typ in ("grand", "subtotal"):
+                        cA.font = bold; cB.font = bold; cD.font = bold; cP.font = bold
+
+                    row_cursor += 1
+
+                ws.freeze_panes = "A2"
+
+                # Conditional formatting on Δ and Δ%
+                nrows = ws.max_row
+                if nrows > 1:
+                    red = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+                    green = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+
+                    def add_rules(cidx):
+                        col_letter = get_column_letter(cidx)
+                        rng = f"{col_letter}2:{col_letter}{nrows}"
+                        if favorable_is_lower:
+                            ws.conditional_formatting.add(rng, CellIsRule(operator='greaterThan', formula=['0'], fill=red))
+                            ws.conditional_formatting.add(rng, CellIsRule(operator='lessThan', formula=['0'], fill=green))
+                        else:
+                            ws.conditional_formatting.add(rng, CellIsRule(operator='greaterThan', formula=['0'], fill=green))
+                            ws.conditional_formatting.add(rng, CellIsRule(operator='lessThan', formula=['0'], fill=red))
+
+                    add_rules(len(group_fields) + 3)  # Δ
+                    add_rules(len(group_fields) + 4)  # Δ%
+
+                # Outline grouping (collapse/expand)
+                for start_r, end_r, outline_level in spans:
+                    if end_r >= start_r:
+                        ws.row_dimensions.group(start_r, end_r, outline_level=outline_level, hidden=True)
+                ws.sheet_properties.outlinePr.summaryBelow = True
+
+            # After saving with openpyxl, build REAL native pivot with xlwings (Excel required)
+            try:
+                if xw is not None:
+                    self._create_native_pivot_xlwings(
+                        path,
+                   
+                        group_fields=group_fields,
+                        scenario_a=ctx["scenario_a"],
+                        scenario_b=ctx["scenario_b"]
+
+                    )
+            except Exception as e:
+                # Not fatal; user still gets outline pivot + flat
+                QtWidgets.QMessageBox.warning(
+                    self, "Native Pivot not created",
+                    "Report saved.\n\nBut a real Excel PivotTable could not be created.\n"
+                    f"Reason: {e}\n\n"
+                    "Tip: Ensure Excel is installed and xlwings is installed."
+                )
+
+            QtWidgets.QMessageBox.information(self, "Exported", f"Variance report saved to:\n{path}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Export Error", str(e))
+
+
+
+# Main
+
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName(APP_TITLE)
+    win = FinanceApp()
+    win.showMaximized()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
