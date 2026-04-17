@@ -1,0 +1,1063 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import base64, os, re, calendar, time
+from typing import List, Tuple, Optional
+
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="Variance Analysis Tool", layout="wide", initial_sidebar_state="collapsed")
+
+# ─────────────────────────────────────────────
+# LOGO HELPERS
+# ─────────────────────────────────────────────
+NISSAN_LOGO_PATH  = "nissan_logo.png"
+GENPACT_LOGO_PATH = "genpact_logo.png"
+
+def img_to_b64(path):
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return None
+
+nissan_b64  = img_to_b64(NISSAN_LOGO_PATH)
+genpact_b64 = img_to_b64(GENPACT_LOGO_PATH)
+
+def logo_tag(b64, alt, height=44):
+    if b64:
+        return f'<img src="data:image/png;base64,{b64}" alt="{alt}" style="height:{height}px;object-fit:contain;">'
+    color = "#c8102e" if alt == "Nissan" else "#00a651"
+    return f'<span style="color:{color};font-weight:800;font-size:1.1rem;letter-spacing:2px;">{alt.upper()}</span>'
+
+# ─────────────────────────────────────────────
+# CSS
+# ─────────────────────────────────────────────
+HEADER_H = 64
+FOOTER_H = 50
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+
+*, *::before, *::after {{ box-sizing: border-box; }}
+
+html, body, [data-testid="stAppViewContainer"] {{
+    background: #070c14 !important;
+    font-family: 'Sora', sans-serif !important;
+}}
+[data-testid="stMain"] {{
+    background: #f1f5fb !important;
+}}
+[data-testid="stMain"] > div:first-child {{
+    background: #f1f5fb !important;
+    color: #0f1f3d !important;
+    padding-top: {HEADER_H + 22}px !important;
+    padding-bottom: {FOOTER_H + 22}px !important;
+    padding-left: 48px !important;
+    padding-right: 48px !important;
+}}
+[data-testid="stMain"] p,
+[data-testid="stMain"] span,
+[data-testid="stMain"] label,
+[data-testid="stMain"] div {{ color: #0f1f3d; }}
+
+#MainMenu, header[data-testid="stHeader"], footer {{ display:none !important; }}
+[data-testid="stSidebar"] {{ display:none !important; }}
+
+/* ── HEADER ── */
+.va-header {{
+    position: fixed; top: 0; left: 0; right: 0;
+    height: {HEADER_H}px; background: #070c14;
+    border-bottom: 1px solid #1a2744;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 32px; z-index: 9999;
+    box-shadow: 0 4px 32px rgba(0,0,0,.6);
+}}
+.va-header-center {{
+    display: flex; flex-direction: column; align-items: center; gap: 1px; flex: 1;
+}}
+.va-header-title {{
+    font-family: 'Sora', sans-serif;
+    font-size: .95rem; font-weight: 800; letter-spacing: .18em;
+    color: #ffffff !important; text-transform: uppercase;
+}}
+.va-header-title em {{ color: #60a5fa !important; font-style: normal; }}
+.va-header-sub {{
+    font-size: .6rem; letter-spacing: .14em;
+    color: #c8d6f0 !important; text-transform: uppercase;
+}}
+
+/* ── FOOTER ── */
+.va-footer {{
+    position: fixed; bottom: 0; left: 0; right: 0;
+    height: {FOOTER_H}px; background: #070c14;
+    border-top: 1px solid #1a2744;
+    display: flex; align-items: center; justify-content: center;
+    gap: 24px; z-index: 9999; font-size: .68rem; letter-spacing: .06em;
+}}
+.va-footer span {{ color: #d0ddf5 !important; }}
+.va-footer a {{ color: #93c5fd !important; text-decoration: none; }}
+.va-footer-sep {{ color: #3a4f78 !important; }}
+
+/* ── Section Label ── */
+.va-section-label {{
+    font-family: 'Sora', sans-serif;
+    font-size: .65rem; font-weight: 700; letter-spacing: .18em;
+    text-transform: uppercase; color: #2563eb !important;
+    margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+}}
+.va-section-label::after {{ content: ''; flex: 1; height: 1px; background: #d1dced; }}
+
+/* ── Divider ── */
+.va-divider {{ border: none; border-top: 1px solid #d8e2f0; margin: 22px 0; }}
+
+/* ── Metric cards ── */
+.va-metric-card {{
+    background: #fff; border: 1px solid #dce6f5;
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
+    box-shadow: 0 1px 3px rgba(15,31,61,.05);
+}}
+.va-metric-card .mlabel {{
+    font-size: .62rem; letter-spacing: .1em; text-transform: uppercase;
+    color: #6b7fa3 !important; margin-bottom: 5px;
+}}
+.va-metric-card .mvalue {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.35rem; font-weight: 600; color: #0f1f3d !important;
+}}
+.va-metric-card .msub {{ font-size: .68rem; color: #8a99bc !important; margin-top: 3px; }}
+
+/* ── Progress overlay ── */
+.va-prog-box {{
+    background: #fff; border: 1px solid #dce6f5; border-radius: 12px;
+    padding: 18px 24px; margin: 10px 0;
+    box-shadow: 0 2px 12px rgba(15,31,61,.08);
+}}
+.va-prog-title {{
+    font-size: .75rem; font-weight: 700; letter-spacing: .06em;
+    color: #2563eb !important; margin-bottom: 10px;
+}}
+.va-prog-step {{
+    font-size: .64rem; color: #6b7fa3 !important; margin-top: 7px;
+    font-family: 'JetBrains Mono', monospace;
+}}
+
+/* ── Hotspot 4-card row (2 adverse + 2 favourable) ── */
+.hs-row {{
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 14px;
+}}
+.hs-card {{
+    border-radius: 8px; padding: 10px 12px;
+    border: 1px solid; position: relative; min-width: 0;
+}}
+.hs-badge {{
+    display: inline-block; font-size: .5rem; font-weight: 800;
+    letter-spacing: .09em; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 3px; margin-bottom: 5px;
+}}
+.hs-dim {{
+    font-size: .52rem; font-weight: 600; letter-spacing: .07em;
+    text-transform: uppercase; opacity: .6; margin-bottom: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
+.hs-name {{
+    font-size: .72rem; font-weight: 700; margin-bottom: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
+.hs-delta {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .9rem; font-weight: 700; margin-bottom: 2px;
+}}
+.hs-meta {{
+    font-size: .56rem; opacity: .62; margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
+/* Adverse shades */
+.hs-adv1 {{ background:#fef2f2; border-color:#dc2626; }}
+.hs-adv1 .hs-badge {{ background:#dc2626; color:#fff !important; }}
+.hs-adv1 .hs-dim,.hs-adv1 .hs-name,.hs-adv1 .hs-meta {{ color:#7f1d1d !important; }}
+.hs-adv1 .hs-delta {{ color:#dc2626 !important; }}
+.hs-adv2 {{ background:#fff8f8; border-color:#fca5a5; }}
+.hs-adv2 .hs-badge {{ background:#f87171; color:#fff !important; }}
+.hs-adv2 .hs-dim,.hs-adv2 .hs-name,.hs-adv2 .hs-meta {{ color:#991b1b !important; }}
+.hs-adv2 .hs-delta {{ color:#ef4444 !important; }}
+/* Favourable shades */
+.hs-fav1 {{ background:#f0fdf4; border-color:#059669; }}
+.hs-fav1 .hs-badge {{ background:#059669; color:#fff !important; }}
+.hs-fav1 .hs-dim,.hs-fav1 .hs-name,.hs-fav1 .hs-meta {{ color:#064e3b !important; }}
+.hs-fav1 .hs-delta {{ color:#059669 !important; }}
+.hs-fav2 {{ background:#f6fef9; border-color:#6ee7b7; }}
+.hs-fav2 .hs-badge {{ background:#34d399; color:#fff !important; }}
+.hs-fav2 .hs-dim,.hs-fav2 .hs-name,.hs-fav2 .hs-meta {{ color:#065f46 !important; }}
+.hs-fav2 .hs-delta {{ color:#10b981 !important; }}
+
+/* ── Pivot table ── */
+.pivot-wrap {{
+    background: #fff; border: 1px solid #dce6f5; border-radius: 12px;
+    overflow: hidden; box-shadow: 0 1px 4px rgba(15,31,61,.06);
+}}
+.pivot-table {{ width: 100%; border-collapse: collapse; font-size: .82rem; }}
+.pivot-table thead th {{
+    background: #0f1f3d; color: #e8edf8 !important;
+    font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: 10px 14px; text-align: right; white-space: nowrap; border: none;
+}}
+.pivot-table thead th.left {{ text-align: left; }}
+.pivot-table tbody tr.grand {{ background: #1e3a5f; border-bottom: 2px solid #2563eb; }}
+.pivot-table tbody tr.grand td {{
+    color: #e8edf8 !important; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace; padding: 10px 14px;
+}}
+.pivot-table tbody tr.lvl1-header {{ background: #dde8f8; border-bottom: 1px solid #c4d4ed; }}
+.pivot-table tbody tr.lvl1-header td {{ font-weight: 700; color: #0d2a5a !important; padding: 8px 14px; font-size: .8rem; }}
+.pivot-table tbody tr.lvl2-header {{ background: #eef4fc; border-bottom: 1px solid #d4e3f4; }}
+.pivot-table tbody tr.lvl2-header td {{ font-weight: 600; color: #1a3460 !important; padding: 7px 14px; font-size: .78rem; }}
+.pivot-table tbody tr.subtotal {{ background: #f0f5fd; border-top: 1px solid #c4d4ed; border-bottom: 1px solid #c4d4ed; }}
+.pivot-table tbody tr.subtotal td {{
+    font-weight: 600; color: #0f1f3d !important;
+    font-family: 'JetBrains Mono', monospace; padding: 7px 14px; font-size: .78rem; font-style: italic;
+}}
+.pivot-table tbody tr.detail {{ background: #fff; border-bottom: 1px solid #eff3fb; }}
+.pivot-table tbody tr.detail:hover {{ background: #f5f9ff; }}
+.pivot-table tbody tr.detail td {{
+    color: #233057 !important; padding: 6px 14px;
+    font-family: 'JetBrains Mono', monospace; font-size: .78rem;
+}}
+.pivot-table td.label-cell {{ text-align: left; font-family: 'Sora', sans-serif !important; }}
+.pivot-table td.num {{ text-align: right; }}
+.pivot-table td.fav {{ color: #059669 !important; font-weight: 700; }}
+.pivot-table td.adv {{ color: #dc2626 !important; font-weight: 700; }}
+.pivot-table td.neutral {{ color: #6b7fa3 !important; }}
+.pivot-table td.indent1 {{ padding-left: 28px !important; }}
+.pivot-table td.indent2 {{ padding-left: 46px !important; }}
+.pivot-table td.indent3 {{ padding-left: 64px !important; }}
+
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {{
+    background: #fff !important; border: 1.5px dashed #93c5fd !important;
+    border-radius: 12px !important; padding: 20px 28px !important;
+    box-shadow: 0 1px 4px rgba(59,130,246,.06) !important;
+}}
+[data-testid="stFileUploader"] label,
+[data-testid="stFileUploader"] span,
+[data-testid="stFileUploader"] p {{ color: #0f1f3d !important; }}
+
+/* ── Multiselect — fixed height, horizontal chip scroll ── */
+[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {{
+    background: #fff !important; border: 1px solid #93c5fd !important;
+    border-radius: 8px !important; color: #0f1f3d !important;
+    min-height: 36px !important; max-height: 36px !important;
+    overflow-x: auto !important; overflow-y: hidden !important;
+    flex-wrap: nowrap !important; display: flex !important;
+    align-items: center !important;
+    scrollbar-width: thin; scrollbar-color: #93c5fd #f1f5fb;
+}}
+[data-testid="stMultiSelect"] div[data-baseweb="select"] > div::-webkit-scrollbar {{ height: 3px; }}
+[data-testid="stMultiSelect"] div[data-baseweb="select"] > div::-webkit-scrollbar-thumb {{
+    background: #93c5fd; border-radius: 99px;
+}}
+[data-testid="stMultiSelect"] [data-baseweb="tag"] {{
+    height: 20px !important; padding: 0 5px !important;
+    font-size: .6rem !important; border-radius: 4px !important;
+    white-space: nowrap !important; flex-shrink: 0 !important;
+}}
+[data-testid="stMultiSelect"] [data-baseweb="tag"] span {{ font-size: .6rem !important; color: #0f1f3d !important; }}
+[data-testid="stMultiSelect"] input {{ font-size: .68rem !important; min-width: 36px !important; }}
+
+/* ── Selectbox — same compact height ── */
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
+    background: #fff !important; border: 1px solid #93c5fd !important;
+    border-radius: 8px !important; color: #0f1f3d !important;
+    min-height: 36px !important; max-height: 36px !important;
+    font-size: .75rem !important;
+}}
+[data-testid="stSelectbox"] div[data-baseweb="select"] span {{ font-size: .75rem !important; color: #0f1f3d !important; }}
+
+/* Labels */
+[data-testid="stMain"] .stSelectbox label,
+[data-testid="stMain"] .stMultiSelect label {{ color: #0f1f3d !important; font-weight: 500; font-size: .75rem; }}
+
+/* ── Tabs ── */
+[data-testid="stTabs"] [role="tablist"] {{ gap: 4px; border-bottom: 2px solid #dce6f5; }}
+[data-testid="stTabs"] [role="tab"] {{
+    font-family: 'Sora', sans-serif; font-weight: 600;
+    font-size: .78rem; letter-spacing: .08em;
+    color: #6b7fa3 !important; padding: 8px 20px;
+    border-radius: 8px 8px 0 0; border: none; background: transparent;
+}}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{
+    color: #1d4ed8 !important; background: #eff5ff; border-bottom: 2px solid #2563eb;
+}}
+
+/* ── Expander ── */
+[data-testid="stExpander"] {{
+    background: #fff !important; border: 1px solid #dce6f5 !important; border-radius: 10px !important;
+}}
+[data-testid="stExpander"] summary {{ font-weight: 600 !important; color: #0f1f3d !important; }}
+
+/* ── Buttons — RED + WHITE text ── */
+[data-testid="stButton"] button {{
+    background: #dc2626 !important; color: #ffffff !important;
+    border: none !important; border-radius: 8px !important;
+    font-family: 'Sora', sans-serif !important;
+    font-weight: 600 !important; letter-spacing: .04em !important;
+    padding: 8px 22px !important; font-size: .8rem !important;
+}}
+[data-testid="stButton"] button:hover {{ background: #b91c1c !important; color: #ffffff !important; }}
+[data-testid="stButton"] button * {{ color: #ffffff !important; }}
+
+/* ── Download button ── */
+[data-testid="stDownloadButton"] button {{
+    background: #059669 !important; color: #fff !important;
+    border: none !important; border-radius: 8px !important;
+    font-family: 'Sora', sans-serif !important;
+    font-weight: 600 !important; padding: 8px 22px !important; font-size: .8rem !important;
+}}
+[data-testid="stDownloadButton"] button:hover {{ background: #047857 !important; }}
+
+/* ── Alerts ── */
+[data-testid="stInfo"]    {{ background: #eff6ff !important; border: 1px solid #93c5fd !important; border-radius: 8px !important; color: #1d4ed8 !important; }}
+[data-testid="stWarning"] {{ background: #fffbeb !important; border: 1px solid #fbbf24 !important; border-radius: 8px !important; color: #92400e !important; }}
+[data-testid="stSuccess"] {{ background: #ecfdf5 !important; border: 1px solid #6ee7b7 !important; border-radius: 8px !important; color: #065f46 !important; }}
+[data-testid="stMain"] h1, [data-testid="stMain"] h2, [data-testid="stMain"] h3 {{ color: #0f1f3d !important; }}
+[data-testid="stMain"] strong {{ color: #0f1f3d !important; }}
+
+/* ── Progress bar — blue ── */
+[data-testid="stProgressBar"] > div > div {{ background: #2563eb !important; }}
+[data-testid="stProgressBar"] {{ background: #dce6f5 !important; border-radius: 99px !important; }}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# HEADER & FOOTER
+# ─────────────────────────────────────────────
+st.markdown(f"""
+<div class="va-header">
+    <div>{logo_tag(nissan_b64, "Nissan", 40)}</div>
+    <div class="va-header-center">
+        <div class="va-header-title">Variance <em>Analysis</em> Tool</div>
+        <div class="va-header-sub">Finance Data Pipeline · Scenario Intelligence</div>
+    </div>
+    <div>{logo_tag(genpact_b64, "Genpact", 36)}</div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="va-footer">
+    <span>© 2025 Genpact · Nissan Partnership</span>
+    <span class="va-footer-sep">|</span>
+    <span>Variance Analysis Platform</span>
+    <span class="va-footer-sep">|</span>
+    <span>Confidential &amp; Proprietary</span>
+    <span class="va-footer-sep">|</span>
+    <a href="#">Privacy Policy</a>
+    <span class="va-footer-sep">|</span>
+    <a href="#">Support</a>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────
+FULL_TO_ABBR = {m: calendar.month_abbr[i] for i, m in enumerate(calendar.month_name) if m}
+ABBR_SET = set(calendar.month_abbr[1:])
+MONTH_HEADER_REGEX = r"\d{1,2}-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+MONTH_TO_FYNUM = {
+    "Apr": 1, "May": 2, "Jun": 3, "Jul": 4, "Aug": 5, "Sep": 6,
+    "Oct": 7, "Nov": 8, "Dec": 9, "Jan": 10, "Feb": 11, "Mar": 12
+}
+FY_NAMES = ["April","May","June","July","August","September","October","November","December","January","February","March"]
+PREF_GROUP_ORDER = ['OH/LC', 'CostCat description', 'Division_Desc', 'Function_Desc', 'Departement_desc', 'Entity_desc']
+MAPPING_PATH = os.path.join("backend", "mapping.xlsx")
+
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+def normalize_month_header(col) -> str:
+    if hasattr(col, "strftime"):
+        return f"{col.day}-{col.strftime('%b')}"
+    s = str(col).strip()
+    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]+)$", s)
+    if m:
+        d = int(m.group(1)); mon_txt = m.group(2).capitalize()
+        if mon_txt in FULL_TO_ABBR: return f"{d}-{FULL_TO_ABBR[mon_txt]}"
+        if len(mon_txt) == 3 and mon_txt.title() in ABBR_SET: return f"{d}-{mon_txt.title()}"
+    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]{{3}})$", s)
+    if m: return f"{int(m.group(1))}-{m.group(2).title()}"
+    m = re.match(r"^0?(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$", s, re.IGNORECASE)
+    if m: return f"{int(m.group(1))}-{m.group(2).title()}"
+    return s
+
+def normalize_df_headers(df: pd.DataFrame) -> pd.DataFrame:
+    df2 = df.copy(); df2.columns = [normalize_month_header(c) for c in df.columns]; return df2
+
+def get_month_cols(df: pd.DataFrame) -> List[str]:
+    return [c for c in df.columns if re.fullmatch(MONTH_HEADER_REGEX, str(c))]
+
+def compute_mtd_ytd(df: pd.DataFrame, fy_index: int) -> Tuple[pd.DataFrame, List[str], str]:
+    month_cols = get_month_cols(df)
+    if not month_cols: raise ValueError("No month columns found.")
+    df = df.copy()
+    df["YTD"] = df[month_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+    num_to_col = {}
+    for c in month_cols:
+        parts = str(c).split("-")
+        if len(parts) >= 2:
+            mon = parts[1].title()
+            if mon in MONTH_TO_FYNUM: num_to_col[MONTH_TO_FYNUM[mon]] = c
+    if fy_index not in num_to_col:
+        raise ValueError(f"FY month {fy_index} not present. Found: {sorted(num_to_col.keys())}")
+    target_col = num_to_col[fy_index]
+    df["MTD"] = pd.to_numeric(df[target_col], errors="coerce")
+    return df, month_cols, target_col
+
+def fmt_num(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)): return "–"
+    try:
+        v = float(v)
+        if abs(v) >= 1_000_000: return f"{v/1_000_000:,.2f}M"
+        if abs(v) >= 1_000:     return f"{v/1_000:,.1f}K"
+        return f"{v:,.0f}"
+    except: return str(v)
+
+def fmt_num_full(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)): return "–"
+    try: return f"{float(v):,.2f}"
+    except: return str(v)
+
+def fmt_pct(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)): return "–"
+    try: return f"{float(v)*100:+.2f}%"
+    except: return str(v)
+
+def clean_numeric_series(s: pd.Series) -> pd.Series:
+    s2 = s.astype(str).str.strip()
+    s2 = s2.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    s2 = s2.str.replace(",", "", regex=False)
+    return pd.to_numeric(s2, errors="coerce").fillna(0.0)
+
+def variance_color_class(v, favorable_is_lower=True):
+    try:
+        f = float(v)
+        if f == 0: return "neutral"
+        if favorable_is_lower: return "fav" if f < 0 else "adv"
+        else:                  return "fav" if f > 0 else "adv"
+    except: return "neutral"
+
+# ─────────────────────────────────────────────
+# PIVOT TABLE BUILDER
+# ─────────────────────────────────────────────
+def build_pivot_html(leaf_df, group_cols, header_a, header_b, favorable_is_lower=True):
+    if leaf_df is None or leaf_df.empty: return "<p>No data.</p>"
+    df_sorted = leaf_df.sort_values(group_cols).reset_index(drop=True)
+
+    def sums(part):
+        a = float(part["A"].sum()); b = float(part["B"].sum())
+        d = a - b; p = (d / b) if b != 0 else float("nan")
+        return a, b, d, p
+
+    vc = lambda v: variance_color_class(v, favorable_is_lower)
+    n_dim = len(group_cols)
+    rows_html = []
+
+    th_dims = "".join(f'<th class="left">{c}</th>' for c in group_cols)
+    rows_html.append(f"<thead><tr>{th_dims}<th>{header_a}</th><th>{header_b}</th><th>Δ (A−B)</th><th>Δ% vs B</th></tr></thead>")
+    rows_html.append("<tbody>")
+
+    A_t, B_t, D_t, P_t = sums(df_sorted)
+    rows_html.append(
+        f'<tr class="grand"><td class="label-cell" colspan="{n_dim}"><strong>GRAND TOTAL</strong></td>'
+        f'<td class="num">{fmt_num_full(A_t)}</td><td class="num">{fmt_num_full(B_t)}</td>'
+        f'<td class="num {vc(D_t)}">{fmt_num_full(D_t)}</td><td class="num {vc(P_t)}">{fmt_pct(P_t)}</td></tr>'
+    )
+
+    if n_dim == 1:
+        col = group_cols[0]
+        for val in df_sorted[col].astype(str).fillna("").unique():
+            part = df_sorted[df_sorted[col].astype(str).fillna("") == val]
+            a, b, d, p = sums(part)
+            rows_html.append(
+                f'<tr class="detail"><td class="label-cell">{val}</td>'
+                f'<td class="num">{fmt_num_full(a)}</td><td class="num">{fmt_num_full(b)}</td>'
+                f'<td class="num {vc(d)}">{fmt_num_full(d)}</td><td class="num {vc(p)}">{fmt_pct(p)}</td></tr>'
+            )
+    else:
+        def recurse_html(sub_df, level):
+            col = group_cols[level]
+            is_second_last = (level == n_dim - 2)
+            css = f"lvl{level+1}-header"
+            for val in sub_df[col].astype(str).fillna("").unique():
+                part = sub_df[sub_df[col].astype(str).fillna("") == val]
+                indent = f"indent{level}" if level < 3 else "indent3"
+                blank_before = "".join('<td></td>' for _ in range(level))
+                rows_html.append(
+                    f'<tr class="{css}">{blank_before}'
+                    f'<td class="label-cell {indent}" colspan="{n_dim-level}"><strong>{val}</strong></td>'
+                    f'<td></td><td></td><td></td><td></td></tr>'
+                )
+                if is_second_last:
+                    last_col = group_cols[-1]
+                    for lv in part[last_col].astype(str).fillna("").unique():
+                        part2 = part[part[last_col].astype(str).fillna("") == lv]
+                        a, b, d, p = sums(part2)
+                        blanks = "".join('<td></td>' for _ in range(n_dim-1))
+                        indent2 = f"indent{level+1}" if level+1 < 3 else "indent3"
+                        rows_html.append(
+                            f'<tr class="detail">{blanks}<td class="label-cell {indent2}">{lv}</td>'
+                            f'<td class="num">{fmt_num_full(a)}</td><td class="num">{fmt_num_full(b)}</td>'
+                            f'<td class="num {vc(d)}">{fmt_num_full(d)}</td><td class="num {vc(p)}">{fmt_pct(p)}</td></tr>'
+                        )
+                else:
+                    recurse_html(part, level+1)
+                a, b, d, p = sums(part)
+                sub_blanks = "".join('<td></td>' for _ in range(level))
+                sub_indent = f"indent{level}" if level < 3 else "indent3"
+                rows_html.append(
+                    f'<tr class="subtotal">{sub_blanks}'
+                    f'<td class="label-cell {sub_indent}" colspan="{n_dim-level}"><em>{val} — Total</em></td>'
+                    f'<td class="num">{fmt_num_full(a)}</td><td class="num">{fmt_num_full(b)}</td>'
+                    f'<td class="num {vc(d)}">{fmt_num_full(d)}</td><td class="num {vc(p)}">{fmt_pct(p)}</td></tr>'
+                )
+        recurse_html(df_sorted, 0)
+
+    rows_html.append("</tbody>")
+    return f'<div class="pivot-wrap" style="overflow-x:auto;max-height:620px;overflow-y:auto;"><table class="pivot-table">{"".join(rows_html)}</table></div>'
+
+# ─────────────────────────────────────────────
+# HOTSPOT CARDS — 2 worst (red) + 2 best (green)
+# ─────────────────────────────────────────────
+def build_hotspot_cards(leaf_df, group_fields, favorable_is_lower):
+    if leaf_df is None or leaf_df.empty or not group_fields: return ""
+    last_dim = group_fields[-1]
+    if last_dim not in leaf_df.columns: return ""
+
+    agg = (
+        leaf_df.groupby(last_dim, dropna=False)
+        .agg(A=("A","sum"), B=("B","sum")).reset_index()
+    )
+    agg["delta"] = agg["A"] - agg["B"]
+    agg["pct"]   = np.where(agg["B"]==0, np.nan, agg["delta"]/agg["B"])
+
+    if favorable_is_lower:
+        worst2 = agg.nlargest(2, "delta").reset_index(drop=True)
+        best2  = agg.nsmallest(2, "delta").reset_index(drop=True)
+    else:
+        worst2 = agg.nsmallest(2, "delta").reset_index(drop=True)
+        best2  = agg.nlargest(2, "delta").reset_index(drop=True)
+
+    def card(row, css, badge):
+        name  = str(row[last_dim])[:26] if pd.notna(row[last_dim]) else "–"
+        dstr  = fmt_num(row["delta"])
+        pstr  = fmt_pct(row["pct"]) if pd.notna(row["pct"]) else "–"
+        astr  = fmt_num(row["A"])
+        bstr  = fmt_num(row["B"])
+        arrow = "▲" if row["delta"] > 0 else "▼"
+        return (
+            f'<div class="hs-card {css}">'
+            f'<span class="hs-badge">{badge}</span>'
+            f'<div class="hs-dim">{last_dim}</div>'
+            f'<div class="hs-name" title="{name}">{name}</div>'
+            f'<div class="hs-delta">{arrow} {dstr}</div>'
+            f'<div class="hs-meta">Δ% {pstr} &nbsp;·&nbsp; A {astr} &nbsp;B {bstr}</div>'
+            f'</div>'
+        )
+
+    cards = ""
+    for i, row in worst2.iterrows():
+        cards += card(row, f"hs-adv{i+1}", ["▼ Worst","▼ 2nd"][i])
+    for i, row in best2.iterrows():
+        cards += card(row, f"hs-fav{i+1}", ["▲ Best","▲ 2nd"][i])
+
+    return f'<div class="hs-row">{cards}</div>'
+
+# ─────────────────────────────────────────────
+# EXCEL EXPORT
+# ─────────────────────────────────────────────
+def build_excel_export(leaf_df, group_fields, header_a, header_b, sel_period,
+                        sel_markets, sel_regions, sel_divisions,
+                        scenario_a, scenario_b, favorable_is_lower,
+                        pivot_source_long) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.utils import get_column_letter
+    import io
+
+    wb = Workbook()
+    ws_readme = wb.active; ws_readme.title = "README"
+    for r_idx, (k, v) in enumerate([
+        ("Period", sel_period),
+        ("Markets", ", ".join(sel_markets) if sel_markets else "All"),
+        ("Regions", ", ".join(sel_regions) if sel_regions else "All"),
+        ("Scenario A", header_a), ("Scenario B", header_b),
+        ("Favorable when", "A < B (costs)" if favorable_is_lower else "A > B (revenue)"),
+        ("Division filter", ", ".join(sel_divisions) if sel_divisions else "All"),
+    ], 1):
+        ws_readme.cell(r_idx,1,k).font = Font(bold=True); ws_readme.cell(r_idx,2,v)
+    ws_readme.column_dimensions["A"].width = 28; ws_readme.column_dimensions["B"].width = 50
+
+    hdr_fill = PatternFill(start_color="0F1F3D", end_color="0F1F3D", fill_type="solid")
+    hdr_font = Font(color="E8EDF8", bold=True)
+    red_fill   = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+
+    def add_cf(ws, cidx, nrows, fav_lower):
+        cl = get_column_letter(cidx); rng = f"{cl}2:{cl}{nrows}"
+        if fav_lower:
+            ws.conditional_formatting.add(rng, CellIsRule("greaterThan",["0"],fill=red_fill))
+            ws.conditional_formatting.add(rng, CellIsRule("lessThan",["0"],fill=green_fill))
+        else:
+            ws.conditional_formatting.add(rng, CellIsRule("greaterThan",["0"],fill=green_fill))
+            ws.conditional_formatting.add(rng, CellIsRule("lessThan",["0"],fill=red_fill))
+
+    ws_flat = wb.create_sheet("Variance (Flat)")
+    flat = leaf_df.rename(columns={"A":header_a,"B":header_b})
+    flat_cols = group_fields + [header_a, header_b, "Δ (A-B)", "Δ% vs B"]
+    flat_out  = flat[[c for c in flat_cols if c in flat.columns]]
+    for ci,col in enumerate(flat_out.columns,1):
+        c=ws_flat.cell(1,ci,col); c.fill=hdr_fill; c.font=hdr_font; c.alignment=Alignment(horizontal="center")
+    for ri,row in enumerate(flat_out.itertuples(index=False),2):
+        for ci,val in enumerate(row,1): ws_flat.cell(ri,ci,val)
+    nrows_flat = ws_flat.max_row
+    cols_list = flat_out.columns.tolist()
+    if "Δ (A-B)" in cols_list: add_cf(ws_flat, cols_list.index("Δ (A-B)")+1, nrows_flat, favorable_is_lower)
+    if "Δ% vs B" in cols_list: add_cf(ws_flat, cols_list.index("Δ% vs B")+1, nrows_flat, favorable_is_lower)
+    for col in ws_flat.columns: ws_flat.column_dimensions[get_column_letter(col[0].column)].width=18
+    ws_flat.freeze_panes = "A2"
+
+    ws_piv = wb.create_sheet("Pivot (Outline)")
+    def sums(part):
+        a=float(part["A"].sum()); b=float(part["B"].sum())
+        d=a-b; p=(d/b) if b!=0 else float("nan"); return a,b,d,p
+    df_sorted = leaf_df.sort_values(group_fields).reset_index(drop=True)
+    piv_cols  = group_fields + [header_a, header_b, "Δ (A-B)", "Δ% vs B"]
+    for ci,col in enumerate(piv_cols,1):
+        c=ws_piv.cell(1,ci,col); c.fill=hdr_fill; c.font=hdr_font; c.alignment=Alignment(horizontal="center")
+    row_cursor=[2]; spans=[]
+    GRAND_FILL=PatternFill(start_color="1E3A5F",end_color="1E3A5F",fill_type="solid")
+    GRAND_FONT=Font(color="E8EDF8",bold=True)
+    LVL1_FILL=PatternFill(start_color="DDE8F8",end_color="DDE8F8",fill_type="solid")
+    LVL2_FILL=PatternFill(start_color="EEF4FC",end_color="EEF4FC",fill_type="solid")
+    SUB_FILL =PatternFill(start_color="F0F5FD",end_color="F0F5FD",fill_type="solid")
+    BOLD=Font(bold=True); ITALIC=Font(italic=True); n_dim=len(group_fields)
+
+    def write_row(values,fill=None,font=None,indent_col=None,indent_val=0):
+        ri=row_cursor[0]
+        for ci,val in enumerate(values,1):
+            c=ws_piv.cell(ri,ci,val)
+            if fill: c.fill=fill
+            if font: c.font=font
+            if indent_col and ci==indent_col: c.alignment=Alignment(indent=indent_val)
+            if ci>n_dim:
+                c.number_format='#,##0.00' if ci<n_dim+5 else '0.00%'
+                c.alignment=Alignment(horizontal='right')
+        row_cursor[0]+=1; return ri
+
+    A_t,B_t,D_t,P_t=sums(df_sorted)
+    write_row(["GRAND TOTAL"]+[""]*(n_dim-1)+[A_t,B_t,D_t,P_t],fill=GRAND_FILL,font=GRAND_FONT)
+    if n_dim==1:
+        col=group_fields[0]
+        for val in df_sorted[col].astype(str).fillna("").unique():
+            part=df_sorted[df_sorted[col].astype(str).fillna("")==val]
+            a,b,d,p=sums(part); write_row([val,a,b,d,p])
+    else:
+        def recurse_xl(sub_df,level):
+            col=group_fields[level]; is_second_last=(level==n_dim-2)
+            fill=LVL1_FILL if level==0 else LVL2_FILL
+            for val in sub_df[col].astype(str).fillna("").unique():
+                part=sub_df[sub_df[col].astype(str).fillna("")==val]
+                hdr_vals=[""]*n_dim+[None,None,None,None]; hdr_vals[level]=val
+                write_row(hdr_vals,fill=fill,font=BOLD,indent_col=level+1,indent_val=level)
+                child_start=row_cursor[0]
+                if is_second_last:
+                    last_col=group_fields[-1]
+                    for lv in part[last_col].astype(str).fillna("").unique():
+                        part2=part[part[last_col].astype(str).fillna("")==lv]
+                        a,b,d,p=sums(part2); det_vals=[""]*n_dim+[a,b,d,p]; det_vals[n_dim-1]=lv
+                        write_row(det_vals,indent_col=n_dim,indent_val=level+1)
+                else: recurse_xl(part,level+1)
+                child_end=row_cursor[0]-1
+                if child_end>=child_start: spans.append((child_start,child_end,level+1))
+                a,b,d,p=sums(part); sub_vals=[""]*n_dim+[a,b,d,p]; sub_vals[level]=f"{val} — Total"
+                write_row(sub_vals,fill=SUB_FILL,font=ITALIC,indent_col=level+1,indent_val=level)
+        recurse_xl(df_sorted,0)
+    nrows_piv=ws_piv.max_row
+    if nrows_piv>1: add_cf(ws_piv,n_dim+3,nrows_piv,favorable_is_lower); add_cf(ws_piv,n_dim+4,nrows_piv,favorable_is_lower)
+    ws_piv.sheet_properties.outlinePr.summaryBelow=True
+    for sr,er,ol in spans: ws_piv.row_dimensions.group(sr,er,outline_level=ol,hidden=True)
+    ws_piv.freeze_panes="A2"
+    for col in ws_piv.columns: ws_piv.column_dimensions[get_column_letter(col[0].column)].width=20
+
+    if pivot_source_long is not None and not pivot_source_long.empty:
+        ws_src=wb.create_sheet("PivotSource")
+        for ci,col in enumerate(pivot_source_long.columns,1):
+            c=ws_src.cell(1,ci,col); c.fill=hdr_fill; c.font=hdr_font
+        for ri,row in enumerate(pivot_source_long.itertuples(index=False),2):
+            for ci,val in enumerate(row,1): ws_src.cell(ri,ci,val)
+        for col in ws_src.columns: ws_src.column_dimensions[get_column_letter(col[0].column)].width=18
+
+    buf=io.BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
+
+# ─────────────────────────────────────────────
+# SESSION STATE
+# ─────────────────────────────────────────────
+for _k in ["master_df","final_db","leaf_df","pivot_source_long","var_context"]:
+    if _k not in st.session_state: st.session_state[_k]=None
+
+# ─────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────
+tab1, tab2 = st.tabs(["🗂️  Target Mapping", "📈  Variance Analysis"])
+
+# ══════════════════════════════════════════════
+# TAB 1 — TARGET MAPPING
+# ══════════════════════════════════════════════
+with tab1:
+    st.markdown('<p class="va-section-label">📂 Upload Monthly Excel</p>', unsafe_allow_html=True)
+    uploaded_monthly = st.file_uploader("Drop your monthly Excel file here (.xlsx)", type=["xlsx","xls"], key="monthly_upload")
+    st.markdown("<br>", unsafe_allow_html=True)
+    process_btn = st.button("⚙️ Generate Mapping", key="process_btn")
+
+    if process_btn and uploaded_monthly is not None:
+        try:
+            import io
+            pb = st.progress(0, text="Initialising…"); time.sleep(0.1)
+            pb.progress(10, text="Reading Excel file…")
+            raw = pd.read_excel(io.BytesIO(uploaded_monthly.read()), engine="openpyxl")
+            pb.progress(30, text="Normalising headers…")
+            df = normalize_df_headers(raw); month_cols = get_month_cols(df)
+            if not month_cols:
+                pb.empty(); st.error("No month columns detected. Ensure columns like '1-Apr', '2-May' exist.")
+            else:
+                pb.progress(50, text="Computing MTD / YTD…")
+                df2, _, _ = compute_mtd_ytd(df, 1)
+                pb.progress(65, text="Loading mapping file…")
+                mapping_df = None
+                if os.path.exists(MAPPING_PATH):
+                    try: mapping_df = pd.read_excel(MAPPING_PATH, engine="openpyxl")
+                    except: pass
+                pb.progress(80, text="Merging mappings…")
+                if mapping_df is not None:
+                    req1={"Entity_desc","Region","Entity","Market"}; req2={"CostCat description","OH/LC"}
+                    if req1.issubset(mapping_df.columns) and req2.issubset(mapping_df.columns):
+                        df_final = df2.merge(mapping_df[["Entity_desc","Region","Entity","Market"]],on="Entity_desc",how="left")\
+                                      .merge(mapping_df[["CostCat description","OH/LC"]],on="CostCat description",how="left")
+                    else:
+                        df_final = df2.copy(); st.warning("Mapping columns mismatch — proceeding without mapping.")
+                else: df_final = df2.copy()
+                pb.progress(100, text="Done ✓"); time.sleep(0.4); pb.empty()
+                st.session_state.final_db = df_final
+                st.success(f"✅ Mapping generated — {len(df_final):,} rows × {len(df_final.columns)} columns")
+                st.toast("Switch to the 📈 Variance Analysis tab to begin analysis.", icon="➡️")
+        except Exception as e: st.error(f"Mapping error: {e}")
+    elif process_btn and uploaded_monthly is None:
+        st.warning("Please upload a monthly Excel file first.")
+
+    if st.session_state.final_db is not None:
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">📋 Preview (top 100 rows)</p>', unsafe_allow_html=True)
+        with st.expander("Show generated Mapping", expanded=False):
+            st.dataframe(st.session_state.final_db.head(100), use_container_width=True, height=280)
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            import io; csv_buf=io.StringIO(); st.session_state.final_db.to_csv(csv_buf,index=False)
+            st.download_button("📥 Download CSV", csv_buf.getvalue().encode(), "mapping_output.csv", "text/csv")
+        with col_dl2:
+            xl_buf=io.BytesIO()
+            with pd.ExcelWriter(xl_buf,engine="openpyxl") as w: st.session_state.final_db.to_excel(w,index=False,sheet_name="mapping_output")
+            st.download_button("📥 Download Excel", xl_buf.getvalue(), "mapping_output.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# ══════════════════════════════════════════════
+# TAB 2 — VARIANCE ANALYSIS
+# ══════════════════════════════════════════════
+with tab2:
+    st.markdown('<p class="va-section-label">🗄️ Data Source</p>', unsafe_allow_html=True)
+    src_mode = st.selectbox("Select data source mode", [
+        "Use Generated Output (from Target Mapping)",
+        "Upload Master DB (single file with both scenarios)",
+        "Upload Two Files (A & B — assign scenario labels)"
+    ], key="src_mode")
+
+    master_df_loaded = None
+    if src_mode == "Use Generated Output (from Target Mapping)":
+        if st.session_state.final_db is not None:
+            master_df_loaded = normalize_df_headers(st.session_state.final_db)
+            st.success(f"✅ Using mapping output — {len(master_df_loaded):,} rows")
+        else:
+            st.warning("No mapping output found. Go to **Target Mapping** tab and process a file first.")
+    elif src_mode == "Upload Master DB (single file with both scenarios)":
+        upl_master = st.file_uploader("Upload Master DB (.xlsx)", type=["xlsx","xls"], key="upl_master")
+        if upl_master:
+            import io
+            master_df_loaded = normalize_df_headers(pd.read_excel(io.BytesIO(upl_master.read()), engine="openpyxl"))
+            st.success(f"✅ Loaded — {len(master_df_loaded):,} rows × {len(master_df_loaded.columns)} columns")
+    else:
+        col_a_up, col_b_up = st.columns(2)
+        with col_a_up:
+            upl_a = st.file_uploader("File for Scenario A (.xlsx)", type=["xlsx","xls"], key="upl_a")
+            label_a = st.text_input("Scenario A label", "Scenario_A", key="label_a")
+        with col_b_up:
+            upl_b = st.file_uploader("File for Scenario B (.xlsx)", type=["xlsx","xls"], key="upl_b")
+            label_b = st.text_input("Scenario B label", "Scenario_B", key="label_b")
+        if upl_a and upl_b:
+            import io
+            dfa = normalize_df_headers(pd.read_excel(io.BytesIO(upl_a.read()), engine="openpyxl"))
+            dfb = normalize_df_headers(pd.read_excel(io.BytesIO(upl_b.read()), engine="openpyxl"))
+            dfa["Scenario"] = label_a.strip() or "Scenario_A"
+            dfb["Scenario"] = label_b.strip() or "Scenario_B"
+            common = list(set(dfa.columns) & set(dfb.columns))
+            master_df_loaded = pd.concat([dfa[common], dfb[common]], ignore_index=True)
+            st.success(f"✅ Combined — {len(master_df_loaded):,} rows")
+
+    if master_df_loaded is not None:
+        st.session_state.master_df = master_df_loaded
+
+    df_master = st.session_state.master_df
+    if df_master is None:
+        st.info("Load a data source above to begin variance analysis.")
+        st.stop()
+
+    with st.expander(f"📋 Preview data — {len(df_master):,} rows × {len(df_master.columns)} columns", expanded=False):
+        st.dataframe(df_master.head(50), use_container_width=True, height=220)
+
+    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+
+    # ── Detect columns ──
+    month_cols_avail = get_month_cols(df_master)
+    period_cols = sorted(
+        set(month_cols_avail + [c for c in ["YTD","MTD"] if c in df_master.columns]),
+        key=lambda c: (100 if c in ("YTD","MTD") else 0, c)
+    )
+
+    if "Scenario" not in df_master.columns:
+        st.error("Data must contain a **'Scenario'** column.")
+        st.stop()
+
+    scenarios = sorted(df_master["Scenario"].astype(str).dropna().unique().tolist())
+    markets   = sorted(df_master["Market"].astype(str).dropna().unique().tolist())        if "Market"       in df_master.columns else []
+    regions   = sorted(df_master["Region"].astype(str).dropna().unique().tolist())        if "Region"       in df_master.columns else []
+    divisions = sorted(df_master["Division_Desc"].astype(str).dropna().unique().tolist()) if "Division_Desc" in df_master.columns else []
+    entities  = sorted(df_master["Entity_desc"].astype(str).dropna().unique().tolist())   if "Entity_desc"  in df_master.columns else (
+                sorted(df_master["Entity"].astype(str).dropna().unique().tolist())         if "Entity"       in df_master.columns else [])
+    lc_oh     = sorted(df_master["OH/LC"].astype(str).dropna().unique().tolist())         if "OH/LC"        in df_master.columns else []
+    avail_group   = [k for k in PREF_GROUP_ORDER if k in df_master.columns]
+    default_group = [k for k in ['OH/LC','Division_Desc','Function_Desc'] if k in avail_group]
+
+    # ── Config row 1 ──
+    st.markdown('<p class="va-section-label">🎛️ Filters & Configuration</p>', unsafe_allow_html=True)
+    cfg1, cfg2, cfg3 = st.columns(3)
+    with cfg1: sel_period = st.selectbox("📅 Period", period_cols, index=len(period_cols)-1, key="sel_period")
+    with cfg2: scenario_a = st.selectbox("📌 Scenario A (Base)", scenarios, index=0, key="sc_a")
+    with cfg3:
+        opts_b = [s for s in scenarios if s != scenario_a] or scenarios
+        scenario_b = st.selectbox("📌 Scenario B (Compare)", opts_b, index=0, key="sc_b")
+
+    # ── Filter row — single default, multiselect with horizontal scroll ──
+    flt1, flt2, flt3, flt4, flt5 = st.columns(5)
+    with flt1: sel_markets   = st.multiselect("🌍 Market",   markets,   default=markets[:1]   if markets   else [], key="sel_markets")   if markets   else []
+    with flt2: sel_regions   = st.multiselect("🗺️ Region",   regions,   default=regions[:1]   if regions   else [], key="sel_regions")   if regions   else []
+    with flt3: sel_divisions = st.multiselect("🏢 Division", divisions, default=divisions[:1] if divisions else [], key="sel_divisions") if divisions else []
+    with flt4: sel_entities  = st.multiselect("🏛️ Entity",   entities,  default=entities[:1]  if entities  else [], key="sel_entities")  if entities  else []
+    with flt5: sel_lc_oh     = st.multiselect("🏷️ OH/LC",    lc_oh,     default=lc_oh[:1]     if lc_oh     else [], key="sel_lc_oh")     if lc_oh     else []
+
+    cfg4, cfg5 = st.columns([2,1])
+    with cfg4:
+        sel_groups = st.multiselect(
+            "🔀 Pivot Row Fields (hierarchy — top = highest level)",
+            avail_group, default=default_group if default_group else avail_group[:2], key="sel_groups"
+        )
+    with cfg5:
+        fav_mode = st.radio("✅ Favorable variance when",
+            ["A < B  (cost — lower is better)", "A > B  (revenue — higher is better)"], key="fav_mode")
+        favorable_is_lower = fav_mode.startswith("A < B")
+
+    # ── Run button ──
+    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+    run_btn = st.button("▶  Run Variance Analysis", key="run_btn")
+
+    if run_btn:
+        if not sel_groups:
+            st.warning("Select at least one Pivot Row Field.")
+        elif sel_period not in df_master.columns:
+            st.error(f"Period column '{sel_period}' not found in data.")
+        else:
+            # ── Stepped progress bar (replaces blur spinner) ──
+            prog_box   = st.empty()
+            prog_bar   = st.progress(0)
+            prog_step  = st.empty()
+
+            STEPS = [
+                (8,  "Preparing workspace…"),
+                (20, "Applying market & region filters…"),
+                (35, "Applying entity & OH/LC filters…"),
+                (48, "Isolating selected scenarios…"),
+                (62, "Aggregating values by group fields…"),
+                (76, "Building pivot matrix…"),
+                (90, "Computing Δ variance & Δ%…"),
+                (97, "Finalising output…"),
+            ]
+
+            def tick(pct, msg):
+                prog_box.markdown(
+                    f'<div class="va-prog-box"><div class="va-prog-title">⏳ Running Variance Analysis — Step {pct}%</div></div>',
+                    unsafe_allow_html=True
+                )
+                prog_bar.progress(pct, text="")
+                prog_step.markdown(f'<div class="va-prog-step">› {msg}</div>', unsafe_allow_html=True)
+                time.sleep(0.07)
+
+            try:
+                tick(*STEPS[0])
+                df_work = df_master.copy()
+                df_work["Scenario"] = df_work["Scenario"].astype(str).str.strip()
+
+                tick(*STEPS[1])
+                if sel_markets   and "Market"       in df_work.columns: df_work = df_work[df_work["Market"].astype(str).isin(sel_markets)]
+                if sel_regions   and "Region"       in df_work.columns: df_work = df_work[df_work["Region"].astype(str).isin(sel_regions)]
+
+                tick(*STEPS[2])
+                if sel_divisions and "Division_Desc" in df_work.columns: df_work = df_work[df_work["Division_Desc"].astype(str).isin(sel_divisions)]
+                if sel_entities  and "Entity_desc"  in df_work.columns: df_work = df_work[df_work["Entity_desc"].astype(str).isin(sel_entities)]
+                elif sel_entities and "Entity"       in df_work.columns: df_work = df_work[df_work["Entity"].astype(str).isin(sel_entities)]
+                if sel_lc_oh     and "OH/LC"        in df_work.columns: df_work = df_work[df_work["OH/LC"].astype(str).isin(sel_lc_oh)]
+
+                tick(*STEPS[3])
+                df_work = df_work[df_work["Scenario"].isin([scenario_a, scenario_b])]
+                group_fields = list(sel_groups)
+                if not group_fields: prog_box.empty(); prog_bar.empty(); prog_step.empty(); st.warning("No group fields."); st.stop()
+                use_cols = group_fields + ["Scenario", sel_period]
+                missing = [c for c in use_cols if c not in df_work.columns]
+                if missing: prog_box.empty(); prog_bar.empty(); prog_step.empty(); st.error(f"Missing columns: {missing}"); st.stop()
+
+                tick(*STEPS[4])
+                base = df_work[use_cols].rename(columns={sel_period:"Value"}).copy()
+                base["Value"] = clean_numeric_series(base["Value"])
+                agg = base.groupby(group_fields+["Scenario"], dropna=False)["Value"].sum().reset_index()
+                pivot_source_long = agg.copy()
+
+                tick(*STEPS[5])
+                piv = agg.pivot_table(index=group_fields, columns="Scenario", values="Value", aggfunc="sum", fill_value=0.0)
+                for s in [scenario_a, scenario_b]:
+                    if s not in piv.columns: piv[s] = 0.0
+                piv = piv[[scenario_a, scenario_b]].rename(columns={scenario_a:"A", scenario_b:"B"})
+
+                tick(*STEPS[6])
+                leaf_df = piv.reset_index()
+                leaf_df["Δ (A-B)"] = leaf_df["A"] - leaf_df["B"]
+                leaf_df["Δ% vs B"] = np.where(leaf_df["B"]==0, np.nan, leaf_df["Δ (A-B)"]/leaf_df["B"])
+                header_a = f"{scenario_a} (A)"; header_b = f"{scenario_b} (B)"
+
+                tick(*STEPS[7])
+                prog_bar.progress(100, text="")
+                prog_box.markdown(
+                    '<div class="va-prog-box"><div class="va-prog-title">✅ Analysis complete!</div></div>',
+                    unsafe_allow_html=True
+                )
+                prog_step.markdown('<div class="va-prog-step">› All steps finished successfully.</div>', unsafe_allow_html=True)
+                time.sleep(0.5)
+                prog_box.empty(); prog_bar.empty(); prog_step.empty()
+
+                st.session_state.leaf_df           = leaf_df
+                st.session_state.pivot_source_long = pivot_source_long
+                st.session_state.var_context = {
+                    "sel_period": sel_period, "sel_markets": sel_markets,
+                    "sel_regions": sel_regions, "sel_divisions": sel_divisions,
+                    "scenario_a": scenario_a, "scenario_b": scenario_b,
+                    "header_a": header_a, "header_b": header_b,
+                    "group_fields": group_fields, "favorable_is_lower": favorable_is_lower,
+                }
+                st.success(f"✅ Variance computed — {len(leaf_df):,} leaf rows")
+                st.toast("Variance analysis complete! Scroll down to view results.", icon="📊")
+
+            except Exception as e:
+                prog_box.empty(); prog_bar.empty(); prog_step.empty()
+                st.error(f"Error: {e}")
+
+    # ── Results ──
+    if st.session_state.leaf_df is not None and st.session_state.var_context is not None:
+        ctx          = st.session_state.var_context
+        leaf_df      = st.session_state.leaf_df
+        group_fields = ctx["group_fields"]
+        header_a     = ctx["header_a"]
+        header_b     = ctx["header_b"]
+        fav_lower    = ctx["favorable_is_lower"]
+
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+
+        # KPI cards
+        total_a   = float(leaf_df["A"].sum())
+        total_b   = float(leaf_df["B"].sum())
+        total_var = total_a - total_b
+        pct_var   = (total_var / total_b * 100) if total_b != 0 else 0.0
+        max_var   = float(leaf_df["Δ (A-B)"].abs().max())
+        n_fav     = int((leaf_df["Δ (A-B)"] > 0).sum()) if fav_lower else int((leaf_df["Δ (A-B)"] < 0).sum())
+        n_adv     = int((leaf_df["Δ (A-B)"] < 0).sum()) if fav_lower else int((leaf_df["Δ (A-B)"] > 0).sum())
+        var_color = "#059669" if (fav_lower and total_var<0) or (not fav_lower and total_var>0) else "#dc2626"
+        arrow     = "▼" if total_var < 0 else "▲"
+
+        k1,k2,k3,k4 = st.columns(4)
+        for col_k, label, value, sub in [
+            (k1, f"Total {ctx['scenario_a']}", fmt_num(total_a), "Scenario A"),
+            (k2, f"Total {ctx['scenario_b']}", fmt_num(total_b), "Scenario B"),
+            (k3, "Net Variance (A−B)", f'<span style="color:{var_color}">{arrow} {fmt_num(total_var)}</span>', f"{pct_var:+.1f}% vs B"),
+            (k4, "Max Single |Δ|", fmt_num(max_var), f"▲ {n_fav} favourable · ▼ {n_adv} adverse"),
+        ]:
+            with col_k:
+                st.markdown(f"""
+<div class="va-metric-card">
+  <div class="mlabel">{label}</div>
+  <div class="mvalue">{value}</div>
+  <div class="msub">{sub}</div>
+</div>""", unsafe_allow_html=True)
+
+        # Pivot
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        with st.expander(f"📊 Pivot Variance · {ctx['sel_period']} · {header_a} vs {header_b}", expanded=True):
+            st.markdown(build_pivot_html(leaf_df, group_fields, header_a, header_b, fav_lower), unsafe_allow_html=True)
+
+        # Hotspot
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">🔍 Variance Hotspot Analysis</p>', unsafe_allow_html=True)
+        last_dim = group_fields[-1] if group_fields else None
+        if last_dim and last_dim in leaf_df.columns and len(leaf_df) > 0:
+            st.caption(f"Grouped by **{last_dim}** · 🔴 2 worst adverse (dark→light) &nbsp;·&nbsp; 🟢 2 best favourable (dark→light)")
+            st.markdown(build_hotspot_cards(leaf_df, group_fields, fav_lower), unsafe_allow_html=True)
+
+        # Top/Bottom 5 — collapsed expanders
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">📈 Top & Bottom 5 Movers</p>', unsafe_allow_html=True)
+        insight_dims = [c for c in group_fields if c in leaf_df.columns]
+        top5_cols = [c for c in (insight_dims[:3] + ["A","B","Δ (A-B)","Δ% vs B"]) if c in leaf_df.columns]
+
+        with st.expander(f"🟢 Top 5 {'Favourable' if fav_lower else 'Positive'} Variance", expanded=False):
+            top5 = (leaf_df.nsmallest(5,"Δ (A-B)") if fav_lower else leaf_df.nlargest(5,"Δ (A-B)"))[top5_cols].reset_index(drop=True)
+            st.dataframe(top5, use_container_width=True, height=210)
+
+        with st.expander(f"🔴 Top 5 {'Adverse' if fav_lower else 'Negative'} Variance", expanded=False):
+            bot5 = (leaf_df.nlargest(5,"Δ (A-B)") if fav_lower else leaf_df.nsmallest(5,"Δ (A-B)"))[top5_cols].reset_index(drop=True)
+            st.dataframe(bot5, use_container_width=True, height=210)
+
+        # Export
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">📥 Export</p>', unsafe_allow_html=True)
+        try:
+            excel_bytes = build_excel_export(
+                leaf_df=leaf_df, group_fields=group_fields,
+                header_a=header_a, header_b=header_b,
+                sel_period=ctx["sel_period"], sel_markets=ctx["sel_markets"],
+                sel_regions=ctx["sel_regions"], sel_divisions=ctx["sel_divisions"],
+                scenario_a=ctx["scenario_a"], scenario_b=ctx["scenario_b"],
+                favorable_is_lower=fav_lower, pivot_source_long=st.session_state.pivot_source_long
+            )
+            safe_period = ctx["sel_period"].replace("/","-")
+            st.download_button("📥 Download Variance Report (Excel)", excel_bytes,
+                f"variance_report_{safe_period}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.caption("Report includes: README · Variance (Flat) · Pivot (Outline with collapse/expand) · PivotSource")
+        except Exception as e:
+            st.error(f"Export error: {e}")
