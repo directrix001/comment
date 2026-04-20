@@ -1,13 +1,1914 @@
-C:\Users\800113527\AppData\Roaming\Python\Python312\site-packages\streamlit\runtime\
-  metrics_util.py:531 in wrapped_func
+import streamlit as st
+import pandas as pd
+import numpy as np
+import base64, os, re, calendar, time, io, json, sqlite3
+from typing import List, Tuple, Optional, Any, Dict
+from datetime import datetime
 
-  C:\Users\800113527\AppData\Roaming\Python\Python312\site-packages\streamlit\elements
-  \widgets\multiselect.py:428 in multiselect
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-  C:\Users\800113527\AppData\Roaming\Python\Python312\site-packages\streamlit\elements
-  \widgets\multiselect.py:553 in _multiselect
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="Variance Analysis Tool", layout="wide", initial_sidebar_state="collapsed")
 
-  C:\Users\800113527\AppData\Roaming\Python\Python312\site-packages\streamlit\elements
-  \lib\options_selector_utils.py:245 in maybe_coerce_enum_sequence
-────────────────────────────────────────────────────────────────────────────────────────
-TypeError: 'NoneType' object is not iterable
+# ─────────────────────────────────────────────
+# LOGO HELPERS
+# ─────────────────────────────────────────────
+NISSAN_LOGO_PATH  = "uzsbf2-nissan-logo-picture.png"
+GENPACT_LOGO_PATH = "Logo2.png"
+
+def img_to_b64(path):
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return None
+
+nissan_b64  = img_to_b64(NISSAN_LOGO_PATH)
+genpact_b64 = img_to_b64(GENPACT_LOGO_PATH)
+
+def logo_tag(b64, alt, height=44):
+    if b64:
+        return f'<img src="data:image/png;base64,{b64}" alt="{alt}" style="height:{height}px;object-fit:contain;">'
+    color = "#c8102e" if alt == "Nissan" else "#00a651"
+    return f'<span style="color:{color};font-weight:800;font-size:1.1rem;letter-spacing:2px;">{alt.upper()}</span>'
+
+# ─────────────────────────────────────────────
+# CSS
+# ─────────────────────────────────────────────
+HEADER_H = 64
+FOOTER_H = 50
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+
+*, *::before, *::after {{ box-sizing: border-box; }}
+
+html, body, [data-testid="stAppViewContainer"] {{
+    background: #070c14 !important;
+    font-family: 'Sora', sans-serif !important;
+}}
+[data-testid="stMain"] {{
+    background: #f1f5fb !important;
+}}
+[data-testid="stMain"] > div:first-child {{
+    background: #f1f5fb !important;
+    color: #0f1f3d !important;
+    padding-top: {HEADER_H + 22}px !important;
+    padding-bottom: {FOOTER_H + 22}px !important;
+    padding-left: 48px !important;
+    padding-right: 48px !important;
+}}
+[data-testid="stMain"] p,
+[data-testid="stMain"] span,
+[data-testid="stMain"] label,
+[data-testid="stMain"] div {{ color: #0f1f3d; }}
+
+#MainMenu, header[data-testid="stHeader"], footer {{ display:none !important; }}
+[data-testid="stSidebar"] {{ display:none !important; }}
+
+/* ── HEADER ── */
+.va-header {{
+    position: fixed; top: 0; left: 0; right: 0;
+    height: {HEADER_H}px; background: #070c14;
+    border-bottom: 1px solid #1a2744;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 32px; z-index: 9999;
+    box-shadow: 0 4px 32px rgba(0,0,0,.6);
+}}
+.va-header-center {{
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+    flex: 1;
+}}
+.va-header-title {{
+    font-family: 'Sora', sans-serif;
+    font-size: .95rem; font-weight: 800; letter-spacing: .18em;
+    color: #ffffff !important; text-transform: uppercase;
+}}
+.va-header-title em {{ color: #60a5fa !important; font-style: normal; }}
+.va-header-sub {{
+    font-size: .6rem; letter-spacing: .14em;
+    color: #c8d6f0 !important; text-transform: uppercase;
+}}
+
+/* ── FOOTER ── */
+.va-footer {{
+    position: fixed; bottom: 0; left: 0; right: 0;
+    height: {FOOTER_H}px; background: #070c14;
+    border-top: 1px solid #1a2744;
+    display: flex; align-items: center; justify-content: center;
+    gap: 24px; z-index: 9999; font-size: .68rem; letter-spacing: .06em;
+}}
+.va-footer span {{ color: #d0ddf5 !important; }}
+.va-footer a {{ color: #93c5fd !important; text-decoration: none; }}
+.va-footer-sep {{ color: #3a4f78 !important; }}
+
+/* ── Section Label ── */
+.va-section-label {{
+    font-family: 'Sora', sans-serif;
+    font-size: .65rem; font-weight: 700; letter-spacing: .18em;
+    text-transform: uppercase; color: #2563eb !important;
+    margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+}}
+.va-section-label::after {{
+    content: ''; flex: 1; height: 1px; background: #d1dced;
+}}
+
+/* ── Divider ── */
+.va-divider {{ border: none; border-top: 1px solid #d8e2f0; margin: 22px 0; }}
+
+/* ── Cards ── */
+.va-card {{
+    background: #ffffff; border: 1px solid #dce6f5;
+    border-radius: 12px; padding: 16px 20px; margin-bottom: 12px;
+    box-shadow: 0 1px 4px rgba(15,31,61,.06);
+}}
+.va-metric-card {{
+    background: #fff; border: 1px solid #dce6f5;
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
+    box-shadow: 0 1px 3px rgba(15,31,61,.05);
+}}
+.va-metric-card .mlabel {{
+    font-size: .62rem; letter-spacing: .1em; text-transform: uppercase;
+    color: #1a2a4a !important; margin-bottom: 5px; font-weight: 700;
+}}
+.va-metric-card .mvalue {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.35rem; font-weight: 700; color: #0a1628 !important;
+}}
+.va-metric-card .msub {{ font-size: .68rem; color: #2d3f66 !important; margin-top: 3px; font-weight: 500; }}
+.va-metric-card .mdetail {{
+    font-size: .65rem; color: #1a3460 !important;
+    margin-top: 6px; padding-top: 6px;
+    border-top: 1px solid #e5eaf5;
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1.5;
+}}
+
+/* ── Hotspot 4-card row ── */
+.hs-row {{
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 18px;
+}}
+.hs-card {{
+    border-radius: 10px;
+    padding: 12px 14px;
+    border: 1px solid;
+    position: relative;
+    overflow: hidden;
+}}
+.hs-card .hs-rank {{
+    position: absolute; top: 8px; right: 10px;
+    font-size: .6rem; font-weight: 800; letter-spacing: .12em;
+    text-transform: uppercase; opacity: .7;
+}}
+.hs-card .hs-dim {{
+    font-size: .58rem; font-weight: 700; letter-spacing: .1em;
+    text-transform: uppercase; margin-bottom: 4px; opacity: .75;
+}}
+.hs-card .hs-name {{
+    font-family: 'Sora', sans-serif;
+    font-size: .78rem; font-weight: 700;
+    margin-bottom: 8px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
+.hs-card .hs-delta {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.05rem; font-weight: 700; margin-bottom: 2px;
+}}
+.hs-card .hs-meta {{
+    font-size: .62rem; opacity: .7; margin-top: 4px;
+}}
+.hs-card.r1 {{ background: #fef2f2; border-color: #dc2626; color: #7f1d1d !important; }}
+.hs-card.r1 .hs-delta {{ color: #dc2626 !important; }}
+.hs-card.r2 {{ background: #fff5f5; border-color: #f87171; color: #991b1b !important; }}
+.hs-card.r2 .hs-delta {{ color: #ef4444 !important; }}
+.hs-card.r3 {{ background: #fff8f8; border-color: #fca5a5; color: #b91c1c !important; }}
+.hs-card.r3 .hs-delta {{ color: #f87171 !important; }}
+.hs-card.r4 {{ background: #fffbfb; border-color: #fecaca; color: #c4392a !important; }}
+.hs-card.r4 .hs-delta {{ color: #fca5a5 !important; }}
+
+/* ── Pivot table ── */
+.pivot-wrap {{
+    background: #fff; border: 1px solid #dce6f5; border-radius: 12px;
+    overflow: hidden; box-shadow: 0 1px 4px rgba(15,31,61,.06);
+}}
+.pivot-table {{ width: 100%; border-collapse: collapse; font-size: .82rem; }}
+.pivot-table thead th {{
+    background: #0f1f3d; color: #e8edf8 !important;
+    font-family: 'Sora', sans-serif; font-weight: 600;
+    font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: 10px 14px; text-align: right; white-space: nowrap;
+    border: none;
+}}
+.pivot-table thead th.left {{ text-align: left; }}
+.pivot-table tbody tr.grand {{
+    background: #1e3a5f; border-bottom: 2px solid #2563eb;
+}}
+.pivot-table tbody tr.grand td {{
+    color: #e8edf8 !important; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace; padding: 10px 14px;
+}}
+.pivot-table tbody tr.lvl1-header {{
+    background: #dde8f8; border-bottom: 1px solid #c4d4ed;
+}}
+.pivot-table tbody tr.lvl1-header td {{
+    font-weight: 700; color: #0d2a5a !important;
+    padding: 8px 14px; font-size: .8rem;
+}}
+.pivot-table tbody tr.lvl2-header {{
+    background: #eef4fc; border-bottom: 1px solid #d4e3f4;
+}}
+.pivot-table tbody tr.lvl2-header td {{
+    font-weight: 600; color: #1a3460 !important;
+    padding: 7px 14px; font-size: .78rem;
+}}
+.pivot-table tbody tr.subtotal {{
+    background: #f0f5fd; border-top: 1px solid #c4d4ed; border-bottom: 1px solid #c4d4ed;
+}}
+.pivot-table tbody tr.subtotal td {{
+    font-weight: 600; color: #0f1f3d !important;
+    font-family: 'JetBrains Mono', monospace; padding: 7px 14px;
+    font-size: .78rem; font-style: italic;
+}}
+.pivot-table tbody tr.detail {{
+    background: #fff; border-bottom: 1px solid #eff3fb;
+}}
+.pivot-table tbody tr.detail:hover {{ background: #f5f9ff; }}
+.pivot-table tbody tr.detail td {{
+    color: #233057 !important; padding: 6px 14px;
+    font-family: 'JetBrains Mono', monospace; font-size: .78rem;
+}}
+.pivot-table td.label-cell {{ text-align: left; font-family: 'Sora', sans-serif !important; }}
+.pivot-table td.num {{ text-align: right; }}
+.pivot-table td.fav {{ color: #059669 !important; font-weight: 700; }}
+.pivot-table td.adv {{ color: #dc2626 !important; font-weight: 700; }}
+.pivot-table td.neutral {{ color: #6b7fa3 !important; }}
+.pivot-table td.indent1 {{ padding-left: 28px !important; }}
+.pivot-table td.indent2 {{ padding-left: 46px !important; }}
+.pivot-table td.indent3 {{ padding-left: 64px !important; }}
+
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {{
+    background: #fff !important; border: 1.5px dashed #93c5fd !important;
+    border-radius: 12px !important; padding: 20px 28px !important;
+    box-shadow: 0 1px 4px rgba(59,130,246,.06) !important;
+}}
+[data-testid="stFileUploader"] label,
+[data-testid="stFileUploader"] span,
+[data-testid="stFileUploader"] p {{ color: #0f1f3d !important; }}
+
+/* ── Selectbox / Multiselect ── */
+[data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
+    background: #fff !important; border: 1px solid #93c5fd !important;
+    border-radius: 8px !important; color: #0f1f3d !important;
+}}
+[data-testid="stMain"] .stSelectbox label,
+[data-testid="stMain"] .stMultiSelect label {{ color: #0f1f3d !important; font-weight: 500; font-size:.82rem; }}
+
+/* ── Tabs ── */
+[data-testid="stTabs"] [role="tablist"] {{
+    gap: 4px; border-bottom: 2px solid #dce6f5;
+}}
+[data-testid="stTabs"] [role="tab"] {{
+    font-family: 'Sora', sans-serif; font-weight: 600;
+    font-size: .78rem; letter-spacing: .08em;
+    color: #6b7fa3 !important; padding: 8px 20px;
+    border-radius: 8px 8px 0 0; border: none;
+    background: transparent;
+}}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{
+    color: #1d4ed8 !important; background: #eff5ff;
+    border-bottom: 2px solid #2563eb;
+}}
+
+/* ── Expander ── */
+[data-testid="stExpander"] {{
+    background: #fff !important; border: 1px solid #dce6f5 !important;
+    border-radius: 10px !important;
+}}
+[data-testid="stExpander"] summary {{ font-weight: 600 !important; color: #0f1f3d !important; }}
+
+/* ── Buttons — RED with WHITE text ── */
+[data-testid="stButton"] button {{
+    background: #dc2626 !important; color: #ffffff !important;
+    border: none !important; border-radius: 8px !important;
+    font-family: 'Sora', sans-serif !important;
+    font-weight: 600 !important; letter-spacing: .04em !important; padding: 8px 22px !important;
+    font-size: .8rem !important;
+}}
+[data-testid="stButton"] button:hover {{ background: #b91c1c !important; color: #ffffff !important; }}
+[data-testid="stButton"] button * {{ color: #ffffff !important; }}
+
+/* ── Download button ── */
+[data-testid="stDownloadButton"] button {{
+    background: #059669 !important; color: #fff !important;
+    border: none !important; border-radius: 8px !important;
+    font-family: 'Sora', sans-serif !important;
+    font-weight: 600 !important; padding: 8px 22px !important;
+    font-size: .8rem !important;
+}}
+[data-testid="stDownloadButton"] button:hover {{ background: #047857 !important; }}
+
+/* ── Alerts ── */
+[data-testid="stInfo"] {{
+    background: #eff6ff !important; border: 1px solid #93c5fd !important;
+    border-radius: 8px !important; color: #1d4ed8 !important;
+}}
+[data-testid="stWarning"] {{
+    background: #fffbeb !important; border: 1px solid #fbbf24 !important;
+    border-radius: 8px !important; color: #92400e !important;
+}}
+[data-testid="stSuccess"] {{
+    background: #ecfdf5 !important; border: 1px solid #6ee7b7 !important;
+    border-radius: 8px !important; color: #065f46 !important;
+}}
+[data-testid="stMain"] h1, [data-testid="stMain"] h2, [data-testid="stMain"] h3 {{ color: #0f1f3d !important; }}
+[data-testid="stMain"] strong {{ color: #0f1f3d !important; }}
+
+/* ── Progress bar — grey ── */
+[data-testid="stProgressBar"] > div > div {{
+    background: #9ca3af !important;
+}}
+[data-testid="stProgressBar"] {{
+    background: #e5e7eb !important;
+    border-radius: 99px !important;
+}}
+
+/* ── RCA AI tab styles ── */
+.rca-kpi-card {{
+    background: #fff; border: 1px solid #dce6f5;
+    border-radius: 10px; padding: 16px 18px;
+    box-shadow: 0 1px 3px rgba(15,31,61,.05);
+    text-align: center;
+}}
+.rca-kpi-card .rca-label {{
+    font-size: .62rem; letter-spacing: .1em; text-transform: uppercase;
+    color: #1a2a4a !important; font-weight: 700; margin-bottom: 6px;
+}}
+.rca-kpi-card .rca-value {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.3rem; font-weight: 700; color: #0a1628 !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# HEADER & FOOTER
+# ─────────────────────────────────────────────
+st.markdown(f"""
+<div class="va-header">
+    <div>{logo_tag(nissan_b64, "Nissan", 40)}</div>
+    <div class="va-header-center">
+        <div class="va-header-title">Variance <em>Analysis</em> Tool</div>
+        <div class="va-header-sub">Finance Data Pipeline · Scenario Intelligence · AI Root Cause</div>
+    </div>
+    <div>{logo_tag(genpact_b64, "Genpact", 36)}</div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="va-footer">
+    <span>© 2025 Genpact · Nissan Partnership</span>
+    <span class="va-footer-sep">|</span>
+    <span>Variance Analysis Platform</span>
+    <span class="va-footer-sep">|</span>
+    <span>Confidential &amp; Proprietary</span>
+    <span class="va-footer-sep">|</span>
+    <a href="#">Privacy Policy</a>
+    <span class="va-footer-sep">|</span>
+    <a href="#">Support</a>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────
+FULL_TO_ABBR = {m: calendar.month_abbr[i] for i, m in enumerate(calendar.month_name) if m}
+ABBR_SET = set(calendar.month_abbr[1:])
+MONTH_HEADER_REGEX = r"\d{1,2}-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+MONTH_TO_FYNUM = {
+    "Apr": 1, "May": 2, "Jun": 3, "Jul": 4, "Aug": 5, "Sep": 6,
+    "Oct": 7, "Nov": 8, "Dec": 9, "Jan": 10, "Feb": 11, "Mar": 12
+}
+FY_NAMES = ["April","May","June","July","August","September","October","November","December","January","February","March"]
+FY_MONTH_OPTIONS = [f"{str(i+1).zfill(2)} - {FY_NAMES[i]}" for i in range(12)]
+PREF_GROUP_ORDER = ['OH/LC', 'CostCat description', 'Region', 'Division_Desc', 'Function_Desc', 'Departement_desc', 'Entity_desc']
+MAPPING_PATH = os.path.join("backend", "mapping.xlsx")
+
+# ─────────────────────────────────────────────
+# SQLITE DB SETUP
+# ─────────────────────────────────────────────
+def init_db():
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS runs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp TEXT, filename TEXT, hierarchy TEXT,
+                  total_variance TEXT, summary TEXT, feedback INTEGER DEFAULT 0)''')
+    try:
+        c.execute("ALTER TABLE runs ADD COLUMN feedback INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_logs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp TEXT, prompt TEXT, response TEXT, feedback INTEGER DEFAULT 0)''')
+    conn.commit()
+    conn.close()
+
+def save_run_to_db(filename, hierarchy, total_variance, summary):
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO runs (timestamp, filename, hierarchy, total_variance, summary) VALUES (?,?,?,?,?)",
+              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), filename, json.dumps(hierarchy), total_variance, summary))
+    run_id = c.lastrowid
+    conn.commit(); conn.close()
+    return run_id
+
+def update_run_feedback(run_id, feedback):
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute("UPDATE runs SET feedback=? WHERE id=?", (feedback, run_id))
+    conn.commit(); conn.close()
+
+def save_chat_to_db(prompt, response):
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO chat_logs (timestamp, prompt, response) VALUES (?,?,?)",
+              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
+    chat_id = c.lastrowid
+    conn.commit(); conn.close()
+    return chat_id
+
+def update_chat_feedback(chat_id, feedback):
+    conn = sqlite3.connect("analysis_history.db")
+    c = conn.cursor()
+    c.execute("UPDATE chat_logs SET feedback=? WHERE id=?", (feedback, chat_id))
+    conn.commit(); conn.close()
+
+def fetch_history_from_db():
+    conn = sqlite3.connect("analysis_history.db")
+    df = pd.read_sql_query("SELECT * FROM runs ORDER BY timestamp DESC", conn)
+    conn.close()
+    return df
+
+init_db()
+
+# ─────────────────────────────────────────────
+# CORE HELPERS
+# ─────────────────────────────────────────────
+def normalize_month_header(col) -> str:
+    if hasattr(col, "strftime"):
+        return f"{col.day}-{col.strftime('%b')}"
+    s = str(col).strip()
+    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]+)$", s)
+    if m:
+        d = int(m.group(1))
+        mon_txt = m.group(2).capitalize()
+        if mon_txt in FULL_TO_ABBR:
+            return f"{d}-{FULL_TO_ABBR[mon_txt]}"
+        if len(mon_txt) == 3 and mon_txt.title() in ABBR_SET:
+            return f"{d}-{mon_txt.title()}"
+    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]{3})$", s)
+    if m:
+        return f"{int(m.group(1))}-{m.group(2).title()}"
+    m = re.match(r"^0?(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$", s, re.IGNORECASE)
+    if m:
+        return f"{int(m.group(1))}-{m.group(2).title()}"
+    return s
+
+def normalize_df_headers(df: pd.DataFrame) -> pd.DataFrame:
+    df2 = df.copy()
+    df2.columns = [normalize_month_header(c) for c in df.columns]
+    return df2
+
+def get_month_cols(df: pd.DataFrame) -> List[str]:
+    return [c for c in df.columns if re.fullmatch(MONTH_HEADER_REGEX, str(c))]
+
+def fmt_num(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "–"
+    try:
+        v = float(v)
+        if abs(v) >= 1_000_000:
+            return f"{v/1_000_000:,.2f}M"
+        if abs(v) >= 1_000:
+            return f"{v/1_000:,.1f}K"
+        return f"{v:,.0f}"
+    except:
+        return str(v)
+
+def fmt_num_full(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "–"
+    try:
+        return f"{float(v):,.2f}"
+    except:
+        return str(v)
+
+def fmt_pct(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "0.00%"   # FIX: return 0.00% instead of "–" when B=0
+    try:
+        return f"{float(v)*100:+.2f}%"
+    except:
+        return "0.00%"
+
+def clean_numeric_series(s: pd.Series) -> pd.Series:
+    s2 = s.astype(str).str.strip()
+    s2 = s2.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    s2 = s2.str.replace(",", "", regex=False)
+    return pd.to_numeric(s2, errors="coerce").fillna(0.0)
+
+def variance_color_class(v, favorable_is_lower=True):
+    try:
+        f = float(v)
+        if f == 0:
+            return "neutral"
+        if favorable_is_lower:
+            return "fav" if f < 0 else "adv"
+        else:
+            return "fav" if f > 0 else "adv"
+    except:
+        return "neutral"
+
+def safe_pct(delta, base):
+    """Return percentage as float, 0.0 when base is zero — never NaN/None."""
+    try:
+        b = float(base)
+        d = float(delta)
+        return (d / b) if b != 0 else 0.0
+    except:
+        return 0.0
+
+def clean_markdown_for_ppt(text: str) -> str:
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.*?)\*', r'\1', text)
+    text = re.sub(r'#(.*?)\n', r'\1\n', text)
+    return text.strip()
+
+# ─────────────────────────────────────────────
+# SAFE MULTISELECT HELPER
+# FIX: ensures default is always a plain list, never None
+# ─────────────────────────────────────────────
+def safe_multiselect(label: str, options: List[str], default: List[str], key: str) -> List[str]:
+    """Wrapper around st.multiselect that guarantees default is a non-None list."""
+    safe_opts    = list(options)    if options    is not None else []
+    safe_default = list(default)    if default    is not None else []
+    # Only keep defaults that are actually in options
+    safe_default = [d for d in safe_default if d in safe_opts]
+    if not safe_opts:
+        return []
+    return st.multiselect(label, safe_opts, default=safe_default, key=key)
+
+# ─────────────────────────────────────────────
+# CACHED DATA LOADERS
+# ─────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def load_excel_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+    buf = io.BytesIO(file_bytes)
+    df = pd.read_excel(buf, engine="openpyxl")
+    return normalize_df_headers(df)
+
+@st.cache_data(show_spinner=False)
+def load_mapping_cached(path: str) -> Optional[pd.DataFrame]:
+    if os.path.exists(path):
+        try:
+            return pd.read_excel(path, engine="openpyxl")
+        except:
+            return None
+    return None
+
+@st.cache_data(show_spinner=False)
+def build_master_df_cached(file_bytes: bytes, file_name: str, mapping_path: str) -> pd.DataFrame:
+    df = load_excel_cached(file_bytes, file_name)
+    month_cols = get_month_cols(df)
+    if not month_cols:
+        return df
+    df_month_numeric = df[month_cols].apply(pd.to_numeric, errors="coerce")
+    df = df.copy()
+    df["YTD"] = df_month_numeric.sum(axis=1)
+    mapping_df = load_mapping_cached(mapping_path)
+    if mapping_df is not None:
+        req1 = {"Entity_desc", "Region", "Entity", "Market"}
+        req2 = {"CostCat description", "OH/LC"}
+        if req1.issubset(mapping_df.columns) and req2.issubset(mapping_df.columns):
+            df = df.merge(
+                mapping_df[["Entity_desc","Region","Entity","Market"]].drop_duplicates("Entity_desc"),
+                on="Entity_desc", how="left"
+            ).merge(
+                mapping_df[["CostCat description","OH/LC"]].drop_duplicates("CostCat description"),
+                on="CostCat description", how="left"
+            )
+    return df
+
+@st.cache_data(show_spinner=False)
+def get_filter_options_cached(file_bytes: bytes, file_name: str, mapping_path: str) -> dict:
+    df = build_master_df_cached(file_bytes, file_name, mapping_path)
+    def uniq(col):
+        if col in df.columns:
+            return sorted(df[col].astype(str).dropna().unique().tolist())
+        return []
+    month_cols = get_month_cols(df)
+    return {
+        "markets": uniq("Market"),
+        "regions": uniq("Region"),
+        "divisions": uniq("Division_Desc"),
+        "entities": uniq("Entity_desc") or uniq("Entity"),
+        "lc_oh": uniq("OH/LC"),
+        "scenarios": uniq("Scenario") if "Scenario" in df.columns else [],
+        "month_cols": month_cols,
+        "avail_group": [k for k in PREF_GROUP_ORDER if k in df.columns],
+        "all_cols": df.columns.tolist(),
+        "num_rows": len(df),
+        "num_cols": len(df.columns),
+    }
+
+# ─────────────────────────────────────────────
+# PIVOT TABLE BUILDER (HTML)
+# ─────────────────────────────────────────────
+def build_pivot_html(leaf_df: pd.DataFrame, group_cols: List[str], header_a: str, header_b: str, favorable_is_lower=True) -> str:
+    if leaf_df is None or leaf_df.empty:
+        return "<p>No data.</p>"
+
+    group_cols = [c for c in group_cols if c in leaf_df.columns]
+    if not group_cols:
+        return "<p>No valid group columns available in data.</p>"
+
+    df_sorted = leaf_df.sort_values(group_cols).reset_index(drop=True)
+
+    def sums(part):
+        a = float(part["A"].sum())
+        b = float(part["B"].sum())
+        d = a - b
+        p = safe_pct(d, b)   # FIX: use safe_pct — always 0.0 when b=0, never NaN
+        return a, b, d, p
+
+    def vc(v):
+        return variance_color_class(v, favorable_is_lower)
+
+    n_dim = len(group_cols)
+    rows_html = []
+
+    th_dims = "".join(f'<th class="left">{c}</th>' for c in group_cols)
+    th_nums = f'<th>{header_a}</th><th>{header_b}</th><th>Δ (A−B)</th><th>Δ% vs B</th>'
+    rows_html.append(f"<thead><tr>{th_dims}{th_nums}</tr></thead>")
+    rows_html.append("<tbody>")
+
+    A_t, B_t, D_t, P_t = sums(df_sorted)
+    gd_dims = f'<td class="label-cell" colspan="{n_dim}"><strong>GRAND TOTAL</strong></td>'
+    rows_html.append(
+        f'<tr class="grand">{gd_dims}'
+        f'<td class="num">{fmt_num_full(A_t)}</td>'
+        f'<td class="num">{fmt_num_full(B_t)}</td>'
+        f'<td class="num {vc(D_t)}">{fmt_num_full(D_t)}</td>'
+        f'<td class="num {vc(P_t)}">{fmt_pct(P_t)}</td>'
+        f'</tr>'
+    )
+
+    if n_dim == 1:
+        col = group_cols[0]
+        for val in df_sorted[col].astype(str).fillna("").unique():
+            part = df_sorted[df_sorted[col].astype(str).fillna("") == val]
+            a, b, d, p = sums(part)
+            rows_html.append(
+                f'<tr class="detail">'
+                f'<td class="label-cell">{val}</td>'
+                f'<td class="num">{fmt_num_full(a)}</td>'
+                f'<td class="num">{fmt_num_full(b)}</td>'
+                f'<td class="num {vc(d)}">{fmt_num_full(d)}</td>'
+                f'<td class="num {vc(p)}">{fmt_pct(p)}</td>'
+                f'</tr>'
+            )
+    else:
+        def recurse_html(sub_df, level):
+            col = group_cols[level]
+            is_second_last = (level == n_dim - 2)
+            css = f"lvl{min(level+1,2)}-header"
+
+            for val in sub_df[col].astype(str).fillna("").unique():
+                part = sub_df[sub_df[col].astype(str).fillna("") == val]
+                indent = f"indent{min(level, 3)}"
+                blank_cols_before = "".join('<td></td>' for _ in range(level))
+                label_td = f'<td class="label-cell {indent}" colspan="{n_dim - level}"><strong>{val}</strong></td>'
+                rows_html.append(f'<tr class="{css}">{blank_cols_before}{label_td}<td></td><td></td><td></td><td></td></tr>')
+
+                if is_second_last:
+                    last_col = group_cols[-1]
+                    for lv in part[last_col].astype(str).fillna("").unique():
+                        part2 = part[part[last_col].astype(str).fillna("") == lv]
+                        a, b, d, p = sums(part2)
+                        blanks = "".join('<td></td>' for _ in range(n_dim - 1))
+                        indent2 = f"indent{min(level+1, 3)}"
+                        rows_html.append(
+                            f'<tr class="detail">'
+                            f'{blanks}'
+                            f'<td class="label-cell {indent2}">{lv}</td>'
+                            f'<td class="num">{fmt_num_full(a)}</td>'
+                            f'<td class="num">{fmt_num_full(b)}</td>'
+                            f'<td class="num {vc(d)}">{fmt_num_full(d)}</td>'
+                            f'<td class="num {vc(p)}">{fmt_pct(p)}</td>'
+                            f'</tr>'
+                        )
+                else:
+                    recurse_html(part, level + 1)
+
+                a, b, d, p = sums(part)
+                sub_blanks = "".join('<td></td>' for _ in range(level))
+                sub_indent = f"indent{min(level, 3)}"
+                rows_html.append(
+                    f'<tr class="subtotal">'
+                    f'{sub_blanks}'
+                    f'<td class="label-cell {sub_indent}" colspan="{n_dim - level}"><em>{val} — Total</em></td>'
+                    f'<td class="num">{fmt_num_full(a)}</td>'
+                    f'<td class="num">{fmt_num_full(b)}</td>'
+                    f'<td class="num {vc(d)}">{fmt_num_full(d)}</td>'
+                    f'<td class="num {vc(p)}">{fmt_pct(p)}</td>'
+                    f'</tr>'
+                )
+
+        recurse_html(df_sorted, 0)
+
+    rows_html.append("</tbody>")
+    table_content = "\n".join(rows_html)
+    return f"""
+<div class="pivot-wrap" style="overflow-x:auto; max-height:620px; overflow-y:auto;">
+  <table class="pivot-table">{table_content}</table>
+</div>
+"""
+
+# ─────────────────────────────────────────────
+# HOTSPOT CARDS
+# ─────────────────────────────────────────────
+def build_hotspot_cards(leaf_df: pd.DataFrame, group_fields: List[str], favorable_is_lower: bool) -> str:
+    if leaf_df is None or leaf_df.empty or not group_fields:
+        return ""
+    last_dim = group_fields[-1]
+    agg = leaf_df.groupby(last_dim, dropna=False).agg(A=("A", "sum"), B=("B", "sum")).reset_index()
+    agg["delta"] = agg["A"] - agg["B"]
+    # FIX: use safe_pct so pct is always a float, never NaN/None
+    agg["pct"] = agg.apply(lambda r: safe_pct(r["delta"], r["B"]), axis=1)
+    if favorable_is_lower:
+        sorted_agg = agg.sort_values("delta", ascending=False).head(4).reset_index(drop=True)
+    else:
+        sorted_agg = agg.sort_values("delta", ascending=True).head(4).reset_index(drop=True)
+    rank_classes = ["r1", "r2", "r3", "r4"]
+    rank_labels  = ["#1 Worst", "#2", "#3", "#4"]
+    cards_html = ""
+    for i, row in sorted_agg.iterrows():
+        rc   = rank_classes[i] if i < 4 else "r4"
+        rl   = rank_labels[i]  if i < 4 else f"#{i+1}"
+        name = str(row[last_dim])[:30] if pd.notna(row[last_dim]) else "–"
+        delta_str = fmt_num(row["delta"])
+        arrow = "▲" if row["delta"] > 0 else "▼"
+        pct_str = fmt_pct(row["pct"])
+        a_str = fmt_num(row["A"])
+        b_str = fmt_num(row["B"])
+        cards_html += f"""
+<div class="hs-card {rc}">
+  <div class="hs-rank">{rl}</div>
+  <div class="hs-dim">{last_dim}</div>
+  <div class="hs-name" title="{name}">{name}</div>
+  <div class="hs-delta">{arrow} {delta_str}</div>
+  <div class="hs-meta">A: {a_str} &nbsp;|&nbsp; B: {b_str}</div>
+  <div class="hs-meta">Δ% vs B: {pct_str}</div>
+</div>"""
+    return f'<div class="hs-row">{cards_html}</div>'
+
+# ─────────────────────────────────────────────
+# EXCEL EXPORT
+# ─────────────────────────────────────────────
+def build_excel_export(leaf_df, group_fields, header_a, header_b, sel_period,
+                        sel_markets, sel_regions, sel_divisions,
+                        scenario_a, scenario_b, favorable_is_lower,
+                        pivot_source_long) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws_readme = wb.active
+    ws_readme.title = "README"
+    readme_data = [
+        ("Period", sel_period),
+        ("Markets", ", ".join(sel_markets) if sel_markets else "All"),
+        ("Regions", ", ".join(sel_regions) if sel_regions else "All"),
+        ("Scenario A", header_a),
+        ("Scenario B", header_b),
+        ("Favorable when", "A < B (costs)" if favorable_is_lower else "A > B (revenue)"),
+        ("Division_Desc filter", ", ".join(sel_divisions) if sel_divisions else "All"),
+    ]
+    for r_idx, (k, v) in enumerate(readme_data, 1):
+        ws_readme.cell(r_idx, 1, k).font = Font(bold=True)
+        ws_readme.cell(r_idx, 2, v)
+    ws_readme.column_dimensions["A"].width = 28
+    ws_readme.column_dimensions["B"].width = 50
+
+    ws_flat = wb.create_sheet("Variance (Flat)")
+    flat = leaf_df.rename(columns={"A": header_a, "B": header_b})
+    flat_cols = group_fields + [header_a, header_b, "Δ (A-B)", "Δ% vs B"]
+    flat_out = flat[[c for c in flat_cols if c in flat.columns]]
+
+    hdr_fill = PatternFill(start_color="0F1F3D", end_color="0F1F3D", fill_type="solid")
+    hdr_font = Font(color="E8EDF8", bold=True)
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+
+    for ci, col in enumerate(flat_out.columns, 1):
+        c = ws_flat.cell(1, ci, col)
+        c.fill = hdr_fill; c.font = hdr_font; c.alignment = Alignment(horizontal="center")
+
+    for ri, row in enumerate(flat_out.itertuples(index=False), 2):
+        for ci, val in enumerate(row, 1):
+            ws_flat.cell(ri, ci, val)
+
+    nrows_flat = ws_flat.max_row
+    d_col = flat_out.columns.tolist().index("Δ (A-B)") + 1 if "Δ (A-B)" in flat_out.columns else None
+    p_col = flat_out.columns.tolist().index("Δ% vs B") + 1 if "Δ% vs B" in flat_out.columns else None
+
+    def add_cf_rules(ws, cidx, nrows, fav_lower):
+        cl = get_column_letter(cidx)
+        rng = f"{cl}2:{cl}{nrows}"
+        if fav_lower:
+            ws.conditional_formatting.add(rng, CellIsRule("greaterThan", ["0"], fill=red_fill))
+            ws.conditional_formatting.add(rng, CellIsRule("lessThan", ["0"], fill=green_fill))
+        else:
+            ws.conditional_formatting.add(rng, CellIsRule("greaterThan", ["0"], fill=green_fill))
+            ws.conditional_formatting.add(rng, CellIsRule("lessThan", ["0"], fill=red_fill))
+
+    if d_col: add_cf_rules(ws_flat, d_col, nrows_flat, favorable_is_lower)
+    if p_col: add_cf_rules(ws_flat, p_col, nrows_flat, favorable_is_lower)
+    for col in ws_flat.columns:
+        ws_flat.column_dimensions[get_column_letter(col[0].column)].width = 18
+    ws_flat.freeze_panes = "A2"
+
+    if pivot_source_long is not None and not pivot_source_long.empty:
+        ws_src = wb.create_sheet("PivotSource")
+        src_cols = list(pivot_source_long.columns)
+        for ci, col in enumerate(src_cols, 1):
+            c = ws_src.cell(1, ci, col)
+            c.fill = hdr_fill; c.font = hdr_font
+        for ri, row in enumerate(pivot_source_long.itertuples(index=False), 2):
+            for ci, val in enumerate(row, 1):
+                ws_src.cell(ri, ci, val)
+        for col in ws_src.columns:
+            ws_src.column_dimensions[get_column_letter(col[0].column)].width = 18
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+# ─────────────────────────────────────────────
+# PPTX EXPORT
+# ─────────────────────────────────────────────
+def generate_ppt_deck(total_variance, exec_summary, rca_text, comm_text, tree_data) -> io.BytesIO:
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        from pptx.enum.text import PP_ALIGN
+        from pptx.dml.color import RGBColor
+    except ImportError:
+        return None
+
+    prs = Presentation()
+    primary_color = RGBColor(14, 43, 92)
+    accent_color  = RGBColor(0, 163, 224)
+    text_color    = RGBColor(89, 89, 89)
+    blank_layout  = prs.slide_layouts[6]
+
+    def add_header(slide, title_text):
+        hdr = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(9), Inches(1))
+        hp = hdr.text_frame.paragraphs[0]
+        hp.text = title_text
+        hp.font.size = Pt(28); hp.font.bold = True; hp.font.color.rgb = primary_color
+
+    s1 = prs.slides.add_slide(blank_layout)
+    tf = s1.shapes.add_textbox(Inches(1), Inches(2.5), Inches(8), Inches(2)).text_frame
+    p = tf.paragraphs[0]
+    p.text = "Variance Analysis & Root Cause Report"
+    p.font.size = Pt(36); p.font.bold = True; p.font.color.rgb = primary_color; p.alignment = PP_ALIGN.CENTER
+    p2 = tf.add_paragraph()
+    p2.text = f"Total Impact: {total_variance}\nReport Date: {datetime.now().strftime('%B %d, %Y')}"
+    p2.font.size = Pt(18); p2.font.color.rgb = text_color; p2.alignment = PP_ALIGN.CENTER
+
+    s2 = prs.slides.add_slide(blank_layout)
+    add_header(s2, "Executive Summary")
+    cf = s2.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
+    cf.word_wrap = True
+    clean_s = clean_markdown_for_ppt(exec_summary)
+    lines = [l.strip() for l in clean_s.split('\n') if l.strip()]
+    for idx, para in enumerate(lines):
+        p = cf.paragraphs[0] if idx == 0 else cf.add_paragraph()
+        is_bullet = para.startswith('-') or para.startswith('*')
+        clean_t = para.lstrip('-*1234567890. ')
+        p.text = f"  •  {clean_t}" if is_bullet else clean_t
+        p.font.size = Pt(14) if is_bullet else Pt(16)
+        p.font.bold = not is_bullet
+        p.font.color.rgb = text_color if is_bullet else primary_color
+
+    s3 = prs.slides.add_slide(blank_layout)
+    add_header(s3, "Recursive Drill-Down Drivers")
+    df_frame = s3.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
+    df_frame.word_wrap = True
+    for idx, node in enumerate(tree_data):
+        p = df_frame.paragraphs[0] if idx == 0 else df_frame.add_paragraph()
+        p.text = f"{node['item']} (Impact: {node['value_display']})"
+        p.font.bold = True; p.font.size = Pt(16); p.font.color.rgb = primary_color
+        for child in node.get('children', [])[:4]:
+            p_sub = df_frame.add_paragraph()
+            p_sub.text = f"  •  {child['column']} - {child['item']} ({child['value_display']})"
+            p_sub.font.size = Pt(14); p_sub.font.color.rgb = text_color
+
+    if rca_text:
+        s4 = prs.slides.add_slide(blank_layout)
+        add_header(s4, "Root Cause Analysis")
+        rf = s4.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
+        rf.word_wrap = True
+        p = rf.paragraphs[0]
+        p.text = clean_markdown_for_ppt(rca_text)
+        p.font.size = Pt(16); p.font.color.rgb = text_color
+
+    if comm_text:
+        s5 = prs.slides.add_slide(blank_layout)
+        add_header(s5, "Category Commentary")
+        cm = s5.shapes.add_textbox(Inches(0.5), Inches(1.4), Inches(9), Inches(5.5)).text_frame
+        cm.word_wrap = True
+        clean_c = clean_markdown_for_ppt(comm_text)
+        comm_lines = [l.strip() for l in clean_c.split('\n') if l.strip()]
+        for idx, para in enumerate(comm_lines):
+            p = cm.paragraphs[0] if idx == 0 else cm.add_paragraph()
+            is_b = para.startswith('-') or para.startswith('*')
+            p.text = f"  •  {para.lstrip('-* ')}" if is_b else para
+            p.font.size = Pt(14) if is_b else Pt(16)
+            p.font.bold = not is_b
+            p.font.color.rgb = text_color if is_b else primary_color
+
+    ppt_stream = io.BytesIO()
+    prs.save(ppt_stream)
+    ppt_stream.seek(0)
+    return ppt_stream
+
+# ─────────────────────────────────────────────
+# RCA LOGIC
+# ─────────────────────────────────────────────
+def build_rca_graph(df, hierarchy_cols, has_variance_col, variance_col, base_scenario, compare_scenario):
+    df_work = df.copy()
+    if has_variance_col:
+        target_col = variance_col
+        if target_col not in df_work.columns:
+            return {"error": f"Column '{target_col}' not found."}
+    else:
+        base_col, comp_col = base_scenario, compare_scenario
+        if base_col not in df_work.columns or comp_col not in df_work.columns:
+            return {"error": "Scenario columns not found."}
+        target_col = "Calculated_Variance"
+        df_work[target_col] = pd.to_numeric(df_work[base_col], errors="coerce") - pd.to_numeric(df_work[comp_col], errors="coerce")
+
+    def fmt_v(v):
+        return f"{float(v)/1e6:,.2f}M"
+
+    total_variance = df_work[target_col].fillna(0).sum()
+    path_trace = [f"Overall Total Variance: {fmt_v(total_variance)}"]
+    final_level_data = [f"Overall Total Variance: {fmt_v(total_variance)}"]
+
+    def build_tree(current_df, depth, indent):
+        if depth >= len(hierarchy_cols) or current_df.empty:
+            return [], [], []
+        col_name = hierarchy_cols[depth]
+        is_first = depth == 0
+        is_last  = depth == len(hierarchy_cols) - 1
+        grouped = current_df.groupby(col_name)[target_col].sum()
+        if grouped.empty or grouped.isna().all():
+            return [], [], []
+        top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
+        trace_lines, final_lines, tree_nodes = [], [], []
+        for item, val in top_5.items():
+            if pd.isna(item):
+                continue
+            item_label = str(item)
+            value_label = fmt_v(float(val))
+            if is_first:
+                trace_lines.append(f"Primary Category: '{item_label}' (Total: {value_label})")
+                final_lines.append(f"\nPrimary Category: '{item_label}' (Total Variance: {value_label})")
+                title = f"Primary Category: {item_label} ({value_label})"
+            elif is_last:
+                trace_lines.append(f"{indent}Final Level ({col_name}): '{item_label}' -> {value_label}")
+                final_lines.append(f"  - {col_name} '{item_label}': {value_label}")
+                title = f"Final Level | {col_name}: {item_label} ({value_label})"
+            else:
+                trace_lines.append(f"{indent}Driver ({col_name}): '{item_label}' -> {value_label}")
+                title = f"Driver | {col_name}: {item_label} ({value_label})"
+            node = {"column": col_name, "item": item_label, "value": float(val),
+                    "value_display": value_label, "title": title, "children": []}
+            if not is_last:
+                next_df = current_df[current_df[col_name] == item]
+                sub_trace, sub_final, sub_nodes = build_tree(next_df, depth + 1, indent + "      ")
+                trace_lines.extend(sub_trace)
+                final_lines.extend(sub_final)
+                node["children"] = sub_nodes
+            tree_nodes.append(node)
+        return trace_lines, final_lines, tree_nodes
+
+    tree_trace, tree_final, tree_nodes = build_tree(df_work, 0, "")
+    path_trace.extend(tree_trace)
+    final_level_data.extend(tree_final)
+
+    final_summary = ""
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_openai import AzureChatOpenAI
+
+        llm = AzureChatOpenAI(
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_KEY"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        )
+        system_prompt = (
+            "You are a strict, professional financial data analyst. Provide an Executive Summary formatted EXACTLY as follows:\n"
+            "1. A brief 1-2 sentence overall conclusion regarding the total variance.\n"
+            "2. A bulleted breakdown for each 'Primary Category' analyzed.\n\n"
+            "---ROOT CAUSE ANALYSIS---\n"
+            "Provide a detailed 4 to 5 line analytical paragraph explaining the underlying root causes.\n\n"
+            "---CATEGORY COMMENTARY---\n"
+            "For each 'Primary Category', provide deep insights formatted EXACTLY as:\n"
+            "[Primary Category Name]:\n"
+            "- Operational Driver: ...\n- Financial Impact: ...\n- Risk/Opportunity: ...\n- Recommended Action: ...\n"
+            "Do not add conversational filler."
+        )
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Filtered Final Level Data:\n{chr(10).join(final_level_data)}")
+        ]
+        response = llm.invoke(messages)
+        final_summary = response.content
+    except Exception as e:
+        final_summary = f"AI generation failed: {e}\n\nRaw drill-down data:\n" + "\n".join(final_level_data[:30])
+
+    return {
+        "path_trace": path_trace,
+        "final_level_data": final_level_data,
+        "tree_data": tree_nodes,
+        "final_summary": final_summary,
+    }
+
+def count_leaf_nodes(nodes):
+    count = 0
+    for node in nodes:
+        children = node.get("children", [])
+        if children:
+            count += count_leaf_nodes(children)
+        else:
+            count += 1
+    return count
+
+def render_trace_tree(nodes):
+    for node in nodes:
+        if node.get("children"):
+            with st.expander(node["title"], expanded=False):
+                render_trace_tree(node["children"])
+        else:
+            st.markdown(f"- **{node['title']}**")
+
+# ─────────────────────────────────────────────
+# SESSION STATE
+# ─────────────────────────────────────────────
+defaults = {
+    "master_df": None,
+    "final_db": None,
+    "leaf_df": None,
+    "pivot_source_long": None,
+    "var_context": None,
+    "rca_result": None,
+    "rca_hierarchy": None,
+    "rca_run_id": None,
+    "rca_feedback_submitted": False,
+    "chat_history": [],
+    "chat_feedback_submitted": {},
+    "_uploaded_bytes": None,
+    "_uploaded_name": None,
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ─────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🗂️  Tagetik Mapping",
+    "📈  Variance Analysis",
+    "🤖  AI Root Cause Analyzer",
+    "💬  Chat with Data",
+    "🗄️  Run History"
+])
+
+# ══════════════════════════════════════════════
+# TAB 1 — TAGETIK MAPPING
+# ══════════════════════════════════════════════
+with tab1:
+    st.markdown('<p class="va-section-label">📂 Upload Monthly Excel</p>', unsafe_allow_html=True)
+
+    uploaded_monthly = st.file_uploader(
+        "Drop your monthly Excel file here (.xlsx)",
+        type=["xlsx", "xls"],
+        key="monthly_upload"
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    process_btn = st.button("⚙️ Generate Mapping", key="process_btn")
+
+    if process_btn and uploaded_monthly is not None:
+        try:
+            progress_bar = st.progress(0, text="Initialising…")
+            time.sleep(0.1)
+            progress_bar.progress(10, text="Reading Excel file…")
+
+            file_bytes = uploaded_monthly.getvalue()
+            file_name  = uploaded_monthly.name
+
+            progress_bar.progress(40, text="Building master dataset with mapping…")
+            df_final = build_master_df_cached(file_bytes, file_name, MAPPING_PATH)
+
+            progress_bar.progress(100, text="Done ✓")
+            time.sleep(0.4)
+            progress_bar.empty()
+
+            st.session_state.final_db = df_final
+            st.session_state._uploaded_bytes = file_bytes
+            st.session_state._uploaded_name  = file_name
+            st.success(f"✅ Mapping generated — {len(df_final):,} rows × {len(df_final.columns)} columns")
+            st.toast("Switch to the 📈 Variance Analysis tab to begin analysis.", icon="➡️")
+
+        except Exception as e:
+            st.error(f"Mapping error: {e}")
+
+    elif process_btn and uploaded_monthly is None:
+        st.warning("Please upload a monthly Excel file first.")
+
+    if st.session_state.final_db is not None:
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">📋 Preview (top 100 rows)</p>', unsafe_allow_html=True)
+        with st.expander("Show generated Mapping", expanded=False):
+            st.dataframe(st.session_state.final_db.head(100), use_container_width=True, height=280)
+
+        col_dl1, col_dl2 = st.columns([1, 1])
+        with col_dl1:
+            csv_buf = io.StringIO()
+            st.session_state.final_db.to_csv(csv_buf, index=False)
+            st.download_button("📥 Download CSV", csv_buf.getvalue().encode(), "mapping_output.csv", "text/csv")
+        with col_dl2:
+            xl_buf = io.BytesIO()
+            with pd.ExcelWriter(xl_buf, engine="openpyxl") as w:
+                st.session_state.final_db.to_excel(w, index=False, sheet_name="mapping_output")
+            st.download_button("📥 Download Excel", xl_buf.getvalue(), "mapping_output.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# ══════════════════════════════════════════════
+# TAB 2 — VARIANCE ANALYSIS
+# ══════════════════════════════════════════════
+with tab2:
+
+    st.markdown('<p class="va-section-label">🗄️ Data Source</p>', unsafe_allow_html=True)
+
+    src_mode = st.selectbox(
+        "Select data source mode",
+        [
+            "Use Generated Output (from Target Mapping)",
+            "Upload Master DB (single file with both scenarios)",
+            "Upload Two Files (A & B — assign scenario labels)"
+        ],
+        key="src_mode"
+    )
+
+    if src_mode == "Use Generated Output (from Target Mapping)":
+        if st.session_state.final_db is not None:
+            df_master = st.session_state.final_db
+            st.success(f"✅ Using mapping output — {len(df_master):,} rows")
+        else:
+            st.warning("No mapping output found. Go to **Target Mapping** tab and process a file first.")
+            df_master = None
+
+    elif src_mode == "Upload Master DB (single file with both scenarios)":
+        upl_master = st.file_uploader("Upload Master DB (.xlsx)", type=["xlsx","xls"], key="upl_master")
+        if upl_master:
+            fb = upl_master.getvalue()
+            fn = upl_master.name
+            df_master = load_excel_cached(fb, fn)
+            st.session_state._uploaded_bytes = fb
+            st.session_state._uploaded_name  = fn
+            st.success(f"✅ Loaded — {len(df_master):,} rows × {len(df_master.columns)} columns")
+        else:
+            df_master = st.session_state.master_df
+
+    else:
+        col_a_up, col_b_up = st.columns(2)
+        with col_a_up:
+            upl_a = st.file_uploader("File for Scenario A (.xlsx)", type=["xlsx","xls"], key="upl_a")
+            label_a = st.text_input("Scenario A label", "Scenario_A", key="label_a")
+        with col_b_up:
+            upl_b = st.file_uploader("File for Scenario B (.xlsx)", type=["xlsx","xls"], key="upl_b")
+            label_b = st.text_input("Scenario B label", "Scenario_B", key="label_b")
+
+        if upl_a and upl_b:
+            dfa = load_excel_cached(upl_a.getvalue(), upl_a.name)
+            dfb = load_excel_cached(upl_b.getvalue(), upl_b.name)
+            dfa["Scenario"] = label_a.strip() or "Scenario_A"
+            dfb["Scenario"] = label_b.strip() or "Scenario_B"
+            common = list(set(dfa.columns) & set(dfb.columns))
+            df_master = pd.concat([dfa[common], dfb[common]], ignore_index=True)
+            st.success(f"✅ Combined — {len(df_master):,} rows")
+        else:
+            df_master = st.session_state.master_df
+
+    if df_master is not None:
+        st.session_state.master_df = df_master
+
+    df_master = st.session_state.master_df
+
+    if df_master is None:
+        st.info("Load a data source above to begin variance analysis.")
+        st.stop()
+
+    with st.expander(f"📋 Preview data — {len(df_master):,} rows × {len(df_master.columns)} columns", expanded=False):
+        st.dataframe(df_master.head(50), use_container_width=True, height=220)
+
+    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+
+    month_cols_avail = get_month_cols(df_master)
+
+    scenario_col_exists = "Scenario" in df_master.columns
+    if not scenario_col_exists:
+        st.error("Data must contain a **'Scenario'** column. Use 'Upload Two Files' mode or ensure your Master DB has a Scenario column.")
+        st.stop()
+
+    scenarios = sorted(df_master["Scenario"].astype(str).dropna().unique().tolist())
+    # FIX: always compute as plain lists, never None
+    markets   = sorted(df_master["Market"].astype(str).dropna().unique().tolist())       if "Market"       in df_master.columns else []
+    regions   = sorted(df_master["Region"].astype(str).dropna().unique().tolist())       if "Region"       in df_master.columns else []
+    divisions = sorted(df_master["Division_Desc"].astype(str).dropna().unique().tolist()) if "Division_Desc" in df_master.columns else []
+    entities  = (sorted(df_master["Entity_desc"].astype(str).dropna().unique().tolist()) if "Entity_desc"   in df_master.columns
+                 else sorted(df_master["Entity"].astype(str).dropna().unique().tolist()) if "Entity"        in df_master.columns else [])
+    lc_oh     = sorted(df_master["OH/LC"].astype(str).dropna().unique().tolist())        if "OH/LC"        in df_master.columns else []
+
+    avail_group  = [k for k in PREF_GROUP_ORDER if k in df_master.columns]
+    default_group = [k for k in ['OH/LC', 'Region', 'Division_Desc', 'Function_Desc'] if k in avail_group]
+
+    st.markdown('<p class="va-section-label">🎛️ Filters & Configuration</p>', unsafe_allow_html=True)
+
+    cfg1, cfg2, cfg3, cfg4 = st.columns([1, 1, 1, 1])
+    with cfg1:
+        period_type = st.radio("📅 Period Type", ["YTD", "MTD"], horizontal=True, key="period_type")
+    with cfg2:
+        if period_type == "MTD":
+            fy_month_display = st.selectbox("📆 Select Month (MTD)", FY_MONTH_OPTIONS, key="fy_month_sel")
+            fy_index = int(fy_month_display.split(" - ")[0])
+            num_to_col = {}
+            for c in month_cols_avail:
+                parts = str(c).split("-")
+                if len(parts) >= 2:
+                    mon = parts[1].title()
+                    if mon in MONTH_TO_FYNUM:
+                        num_to_col[MONTH_TO_FYNUM[mon]] = c
+            sel_period = num_to_col.get(fy_index, month_cols_avail[-1] if month_cols_avail else "YTD")
+            st.caption(f"Using column: **{sel_period}**")
+        else:
+            sel_period = "YTD"
+            if "YTD" not in df_master.columns:
+                df_master = df_master.copy()
+                mc = get_month_cols(df_master)
+                if mc:
+                    df_master["YTD"] = df_master[mc].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+                    st.session_state.master_df = df_master
+            st.caption("Using column: **YTD**")
+    with cfg3:
+        scenario_a = st.selectbox("📌 Scenario A (Base)", scenarios, index=0, key="sc_a")
+    with cfg4:
+        opts_b = [s for s in scenarios if s != scenario_a] or scenarios
+        scenario_b = st.selectbox("📌 Scenario B (Compare)", opts_b, index=0, key="sc_b")
+
+    # ── FILTER MULTISELECTS — all use safe_multiselect to prevent None default ──
+    flt1, flt2, flt3, flt4, flt5 = st.columns([1, 1, 1, 1, 1])
+    with flt1:
+        sel_markets   = safe_multiselect("🌍 Market",   markets,   markets,   key="sel_markets")
+    with flt2:
+        sel_regions   = safe_multiselect("🗺️ Region",   regions,   regions,   key="sel_regions")
+    with flt3:
+        sel_divisions = safe_multiselect("🏢 Division", divisions, divisions, key="sel_divisions")
+    with flt4:
+        sel_entities  = safe_multiselect("🏛️ Entity",   entities,  entities,  key="sel_entities")
+    with flt5:
+        sel_lc_oh     = safe_multiselect("🏷️ OH/LC",    lc_oh,     lc_oh,     key="sel_lc_oh")
+
+    cfg5, cfg6 = st.columns([2, 1])
+    with cfg5:
+        sel_groups = safe_multiselect(
+            "🔀 Pivot Row Fields (hierarchy — top = highest level)",
+            avail_group,
+            default_group if default_group else avail_group[:3],
+            key="sel_groups"
+        )
+    with cfg6:
+        fav_mode = st.radio(
+            "✅ Favorable variance when",
+            ["A < B  (cost — lower is better)", "A > B  (revenue — higher is better)"],
+            key="fav_mode"
+        )
+        favorable_is_lower = fav_mode.startswith("A < B")
+
+    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+    run_btn = st.button("▶  Run Variance Analysis", key="run_btn")
+
+    if run_btn:
+        if not sel_groups:
+            st.warning("Select at least one Pivot Row Field.")
+        elif sel_period not in df_master.columns:
+            st.error(f"Period column '{sel_period}' not found in data.")
+        else:
+            try:
+                prog = st.progress(0, text="🔄 Preparing data…")
+                time.sleep(0.05)
+                prog.progress(10, text="🔄 Preparing data…")
+
+                df_work = df_master.copy()
+                df_work["Scenario"] = df_work["Scenario"].astype(str).str.strip()
+
+                prog.progress(25, text="🔍 Applying filters…")
+
+                if sel_markets and "Market" in df_work.columns:
+                    df_work = df_work[df_work["Market"].astype(str).isin(sel_markets)]
+                if sel_regions and "Region" in df_work.columns:
+                    df_work = df_work[df_work["Region"].astype(str).isin(sel_regions)]
+                if sel_divisions and "Division_Desc" in df_work.columns:
+                    df_work = df_work[df_work["Division_Desc"].astype(str).isin(sel_divisions)]
+                if sel_entities and "Entity_desc" in df_work.columns:
+                    df_work = df_work[df_work["Entity_desc"].astype(str).isin(sel_entities)]
+                elif sel_entities and "Entity" in df_work.columns:
+                    df_work = df_work[df_work["Entity"].astype(str).isin(sel_entities)]
+                if sel_lc_oh and "OH/LC" in df_work.columns:
+                    df_work = df_work[df_work["OH/LC"].astype(str).isin(sel_lc_oh)]
+
+                prog.progress(45, text="📊 Filtering scenarios…")
+                df_work = df_work[df_work["Scenario"].isin([scenario_a, scenario_b])]
+
+                group_fields = list(sel_groups)
+                use_cols = group_fields + ["Scenario", sel_period]
+                missing = [c for c in use_cols if c not in df_work.columns]
+                if missing:
+                    prog.empty()
+                    st.error(f"Missing columns: {missing}")
+                    st.stop()
+
+                prog.progress(60, text="🧮 Aggregating values…")
+                base = df_work[use_cols].rename(columns={sel_period: "Value"}).copy()
+                base["Value"] = clean_numeric_series(base["Value"])
+
+                agg = base.groupby(group_fields + ["Scenario"], dropna=False)["Value"].sum().reset_index()
+                pivot_source_long = agg.copy()
+
+                prog.progress(78, text="🔀 Building pivot table…")
+                piv = agg.pivot_table(index=group_fields, columns="Scenario", values="Value", aggfunc="sum", fill_value=0.0)
+                for s in [scenario_a, scenario_b]:
+                    if s not in piv.columns:
+                        piv[s] = 0.0
+                piv = piv[[scenario_a, scenario_b]].rename(columns={scenario_a: "A", scenario_b: "B"})
+
+                leaf_df = piv.reset_index()
+                leaf_df["Δ (A-B)"] = leaf_df["A"] - leaf_df["B"]
+                # FIX: replace NaN with 0.0 — never leave None in the DataFrame
+                leaf_df["Δ% vs B"] = leaf_df.apply(
+                    lambda r: safe_pct(r["Δ (A-B)"], r["B"]), axis=1
+                )
+
+                header_a = f"{scenario_a} (A)"
+                header_b = f"{scenario_b} (B)"
+
+                prog.progress(100, text="✅ Done!")
+                time.sleep(0.4)
+                prog.empty()
+
+                st.session_state.leaf_df = leaf_df
+                st.session_state.pivot_source_long = pivot_source_long
+                st.session_state.var_context = {
+                    "sel_period": sel_period,
+                    "period_type": period_type,
+                    "sel_markets": sel_markets,
+                    "sel_regions": sel_regions,
+                    "sel_divisions": sel_divisions,
+                    "scenario_a": scenario_a,
+                    "scenario_b": scenario_b,
+                    "header_a": header_a,
+                    "header_b": header_b,
+                    "group_fields": group_fields,
+                    "favorable_is_lower": favorable_is_lower,
+                }
+                st.success(f"✅ Variance computed — {len(leaf_df):,} leaf rows")
+                st.toast("Variance analysis complete! Scroll down to view results.", icon="📊")
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    if st.session_state.leaf_df is not None and st.session_state.var_context is not None:
+        ctx = st.session_state.var_context
+        leaf_df = st.session_state.leaf_df
+        group_fields = ctx["group_fields"]
+        header_a = ctx["header_a"]
+        header_b = ctx["header_b"]
+        fav_lower = ctx["favorable_is_lower"]
+
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+
+        total_a   = float(leaf_df["A"].sum())
+        total_b   = float(leaf_df["B"].sum())
+        total_var = total_a - total_b
+        pct_var   = safe_pct(total_var, total_b) * 100  # FIX: use safe_pct
+        max_var   = float(leaf_df["Δ (A-B)"].abs().max())
+        n_fav     = int((leaf_df["Δ (A-B)"] < 0).sum()) if fav_lower else int((leaf_df["Δ (A-B)"] > 0).sum())
+        n_adv     = int((leaf_df["Δ (A-B)"] > 0).sum()) if fav_lower else int((leaf_df["Δ (A-B)"] < 0).sum())
+
+        var_color = "#059669" if (fav_lower and total_var < 0) or (not fav_lower and total_var > 0) else "#dc2626"
+        arrow = "▼" if total_var < 0 else "▲"
+
+        def group_detail_lines(col_name, top_n=3):
+            if col_name not in leaf_df.columns:
+                return ""
+            agg_g = leaf_df.groupby(col_name).agg(A=("A","sum"), B=("B","sum")).reset_index()
+            agg_g["d"] = agg_g["A"] - agg_g["B"]
+            top = agg_g.reindex(agg_g["d"].abs().sort_values(ascending=False).index).head(top_n)
+            lines = []
+            for _, r in top.iterrows():
+                arrow_g = "▲" if r["d"] > 0 else "▼"
+                lines.append(f"{arrow_g} {str(r[col_name])[:20]}: {fmt_num(r['d'])}")
+            return " &nbsp;·&nbsp; ".join(lines)
+
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            detail1 = group_detail_lines(group_fields[0]) if group_fields else ""
+            st.markdown(f"""
+<div class="va-metric-card">
+  <div class="mlabel">Total {ctx['scenario_a']}</div>
+  <div class="mvalue">{fmt_num(total_a)}</div>
+  <div class="msub">Scenario A · {ctx['sel_period']}</div>
+  <div class="mdetail">{detail1}</div>
+</div>""", unsafe_allow_html=True)
+
+        with k2:
+            detail2 = group_detail_lines(group_fields[-1]) if group_fields else ""
+            st.markdown(f"""
+<div class="va-metric-card">
+  <div class="mlabel">Total {ctx['scenario_b']}</div>
+  <div class="mvalue">{fmt_num(total_b)}</div>
+  <div class="msub">Scenario B · {ctx['sel_period']}</div>
+  <div class="mdetail">{detail2}</div>
+</div>""", unsafe_allow_html=True)
+
+        with k3:
+            fav_label = "Favourable" if (fav_lower and total_var < 0) or (not fav_lower and total_var > 0) else "Adverse"
+            st.markdown(f"""
+<div class="va-metric-card">
+  <div class="mlabel">Net Variance (A−B)</div>
+  <div class="mvalue"><span style="color:{var_color}">{arrow} {fmt_num(total_var)}</span></div>
+  <div class="msub">{pct_var:+.1f}% vs B &nbsp;·&nbsp; {fav_label}</div>
+  <div class="mdetail">▲ {n_adv} adverse rows &nbsp;·&nbsp; ▼ {n_fav} favourable rows<br>
+  Pivot groups: {" › ".join(group_fields)}</div>
+</div>""", unsafe_allow_html=True)
+
+        with k4:
+            worst_row = leaf_df.loc[leaf_df["Δ (A-B)"].abs().idxmax()]
+            worst_label = " / ".join(str(worst_row[g]) for g in group_fields if g in worst_row.index)[:40]
+            st.markdown(f"""
+<div class="va-metric-card">
+  <div class="mlabel">Max Single |Δ|</div>
+  <div class="mvalue">{fmt_num(max_var)}</div>
+  <div class="msub">Largest single variance row</div>
+  <div class="mdetail" title="{worst_label}">📍 {worst_label[:38]}{"…" if len(worst_label) > 38 else ""}<br>
+  A: {fmt_num(float(worst_row['A']))} &nbsp;|&nbsp; B: {fmt_num(float(worst_row['B']))}</div>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        with st.expander(
+            f"📊 Pivot Variance · {ctx['sel_period']} · {header_a} vs {header_b}",
+            expanded=True
+        ):
+            pivot_html = build_pivot_html(leaf_df, group_fields, header_a, header_b, fav_lower)
+            st.markdown(pivot_html, unsafe_allow_html=True)
+
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">🔍 Variance Hotspot Analysis</p>', unsafe_allow_html=True)
+
+        last_dim = group_fields[-1] if group_fields else None
+        if last_dim and last_dim in leaf_df.columns and len(leaf_df) > 0:
+            st.markdown(f"**Top 4 adverse rows by `{last_dim}` — worst to least (darkest → lightest)**")
+            hotspot_html = build_hotspot_cards(leaf_df, group_fields, fav_lower)
+            st.markdown(hotspot_html, unsafe_allow_html=True)
+
+            st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+            st.markdown('<p class="va-section-label">📈 Top & Bottom 5 Movers</p>', unsafe_allow_html=True)
+
+            insight_dims = [c for c in group_fields if c in leaf_df.columns]
+            top5_cols = insight_dims[:3] + ["A", "B", "Δ (A-B)", "Δ% vs B"]
+            top5_cols = [c for c in top5_cols if c in leaf_df.columns]
+
+            t5, b5 = st.columns(2)
+            with t5:
+                st.markdown(f"**Top 5 {'Favourable' if fav_lower else 'Positive'} Variance**")
+                top5 = leaf_df.nsmallest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True) if fav_lower \
+                    else leaf_df.nlargest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True)
+                st.dataframe(top5, use_container_width=True, height=200)
+            with b5:
+                st.markdown(f"**Top 5 {'Adverse' if fav_lower else 'Negative'} Variance**")
+                bot5 = leaf_df.nlargest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True) if fav_lower \
+                    else leaf_df.nsmallest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True)
+                st.dataframe(bot5, use_container_width=True, height=200)
+
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">📥 Export</p>', unsafe_allow_html=True)
+
+        try:
+            excel_bytes = build_excel_export(
+                leaf_df=leaf_df,
+                group_fields=group_fields,
+                header_a=header_a,
+                header_b=header_b,
+                sel_period=ctx["sel_period"],
+                sel_markets=ctx["sel_markets"],
+                sel_regions=ctx["sel_regions"],
+                sel_divisions=ctx["sel_divisions"],
+                scenario_a=ctx["scenario_a"],
+                scenario_b=ctx["scenario_b"],
+                favorable_is_lower=fav_lower,
+                pivot_source_long=st.session_state.pivot_source_long
+            )
+            safe_period = ctx["sel_period"].replace("/", "-")
+            st.download_button(
+                "📥 Download Variance Report (Excel)",
+                excel_bytes,
+                f"variance_report_{safe_period}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            st.caption("Report includes: README · Variance (Flat) · PivotSource")
+        except Exception as e:
+            st.error(f"Export error: {e}")
+
+# ══════════════════════════════════════════════
+# TAB 3 — AI ROOT CAUSE ANALYZER
+# ══════════════════════════════════════════════
+with tab3:
+    st.markdown('<p class="va-section-label">🤖 AI Root Cause Analyzer</p>', unsafe_allow_html=True)
+
+    rca_src = st.radio(
+        "📂 Data source for RCA",
+        ["Use Pivot Data from Variance Analysis", "Upload my own Excel file"],
+        horizontal=True,
+        key="rca_src"
+    )
+
+    rca_df = None
+
+    if rca_src == "Use Pivot Data from Variance Analysis":
+        if st.session_state.leaf_df is not None and st.session_state.var_context is not None:
+            ctx = st.session_state.var_context
+            rca_df = st.session_state.leaf_df.copy()
+            rca_df = rca_df.rename(columns={"A": ctx["scenario_a"], "B": ctx["scenario_b"]})
+            rca_df["Variance"] = rca_df[ctx["scenario_a"]] - rca_df[ctx["scenario_b"]]
+            st.success(f"✅ Loaded pivot data — {len(rca_df):,} rows · Period: {ctx['sel_period']}")
+            with st.expander("Preview pivot data", expanded=False):
+                st.dataframe(rca_df.head(30), use_container_width=True, height=220)
+        else:
+            st.warning("No variance analysis result found. Run the **📈 Variance Analysis** tab first, or upload your own file below.")
+            rca_src = "Upload my own Excel file"
+
+    if rca_src == "Upload my own Excel file":
+        upl_rca = st.file_uploader("Upload Excel for RCA (.xlsx)", type=["xlsx","xls"], key="upl_rca")
+        if upl_rca:
+            rca_df = load_excel_cached(upl_rca.getvalue(), upl_rca.name)
+            st.success(f"✅ Loaded — {len(rca_df):,} rows × {len(rca_df.columns)} columns")
+            with st.expander("Preview data", expanded=False):
+                st.dataframe(rca_df.head(30), use_container_width=True, height=220)
+
+    if rca_df is not None:
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        st.markdown('<p class="va-section-label">⚙️ Configure Analysis</p>', unsafe_allow_html=True)
+
+        rca_num_cols = rca_df.select_dtypes(include=["number"]).columns.tolist()
+
+        _EXCLUDE_FROM_HIER = {"A", "B", "Δ (A-B)", "Δ% vs B", "Variance", "Calculated_Variance"}
+        rca_cat_cols: List[str] = [
+            c for c in rca_df.columns
+            if c not in _EXCLUDE_FROM_HIER
+            and c not in rca_num_cols
+            and isinstance(c, str)
+            and c.strip() != ""
+        ]
+
+        _var_ctx_groups: List[str] = []
+        if st.session_state.var_context is not None:
+            _var_ctx_groups = [
+                c for c in st.session_state.var_context.get("group_fields", [])
+                if isinstance(c, str) and c in rca_df.columns
+            ]
+
+        _rca_hier_default: List[str] = (
+            _var_ctx_groups if _var_ctx_groups
+            else [c for c in rca_cat_cols if c in rca_df.columns]
+        )
+        _seen: set = set()
+        _rca_hier_default_clean: List[str] = []
+        for _c in _rca_hier_default:
+            if _c not in _seen:
+                _seen.add(_c)
+                _rca_hier_default_clean.append(_c)
+
+        rca_all_cols: List[str] = [
+            c for c in rca_df.columns
+            if isinstance(c, str) and c.strip() != ""
+        ]
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            # FIX: use safe_multiselect here too
+            rca_hierarchy = safe_multiselect(
+                "🔀 Hierarchy Flow (Left → deepest level)",
+                rca_all_cols,
+                _rca_hier_default_clean,
+                key="rca_hierarchy"
+            )
+        with c2:
+            has_var_col = st.checkbox(
+                "Variance column already present?",
+                value=("Variance" in rca_df.columns),
+                key="rca_has_var"
+            )
+
+        if has_var_col:
+            default_var = next((c for c in rca_num_cols if "var" in c.lower()), rca_num_cols[0] if rca_num_cols else None)
+            rca_variance_col = st.selectbox(
+                "Select Variance Column", rca_num_cols,
+                index=rca_num_cols.index(default_var) if default_var and default_var in rca_num_cols else 0,
+                key="rca_var_col"
+            ) if rca_num_cols else ""
+            rca_base = rca_comp = ""
+        else:
+            st.caption("Variance = Base − Compare")
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                rca_base = st.selectbox("Base Scenario column", rca_num_cols, key="rca_base") if rca_num_cols else ""
+            with rc2:
+                rca_comp = st.selectbox("Compare Scenario column", rca_num_cols, key="rca_comp") if rca_num_cols else ""
+            rca_variance_col = ""
+
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        rca_run_btn = st.button("🤖  Generate AI Root Cause Analysis", key="rca_run_btn")
+
+        if rca_run_btn:
+            if not rca_hierarchy:
+                st.warning("Select at least one hierarchy column.")
+            else:
+                with st.spinner("Running recursive drill-down and generating AI commentary…"):
+                    st.session_state.rca_feedback_submitted = False
+                    result = build_rca_graph(
+                        df=rca_df,
+                        hierarchy_cols=rca_hierarchy,
+                        has_variance_col=has_var_col,
+                        variance_col=rca_variance_col,
+                        base_scenario=rca_base,
+                        compare_scenario=rca_comp,
+                    )
+                    if "error" in result:
+                        st.error(result["error"])
+                    else:
+                        st.session_state.rca_result = result
+                        st.session_state.rca_hierarchy = rca_hierarchy
+                        total_var_str = result["path_trace"][0].replace("Overall Total Variance: ", "") if result["path_trace"] else "–"
+                        run_id = save_run_to_db(
+                            filename="pivot_data" if rca_src == "Use Pivot Data from Variance Analysis" else "uploaded_file",
+                            hierarchy=rca_hierarchy,
+                            total_variance=total_var_str,
+                            summary=result["final_summary"]
+                        )
+                        st.session_state.rca_run_id = run_id
+                        st.success("✅ AI analysis complete!")
+
+        if st.session_state.rca_result is not None:
+            result = st.session_state.rca_result
+            st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+
+            total_var_str = result["path_trace"][0].replace("Overall Total Variance: ", "") if result["path_trace"] else "–"
+
+            summary_raw = result["final_summary"]
+            exec_summary = summary_raw
+            rca_text = ""
+            comm_text = ""
+            if "---ROOT CAUSE ANALYSIS---" in summary_raw:
+                parts = summary_raw.split("---ROOT CAUSE ANALYSIS---")
+                exec_summary = parts[0].replace("Executive Summary:", "").strip()
+                remainder = parts[1]
+                if "---CATEGORY COMMENTARY---" in remainder:
+                    rca_parts = remainder.split("---CATEGORY COMMENTARY---")
+                    rca_text = rca_parts[0].strip()
+                    comm_text = rca_parts[1].strip()
+                else:
+                    rca_text = remainder.strip()
+
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.markdown(f'<div class="rca-kpi-card"><div class="rca-label">Total Variance</div><div class="rca-value">{total_var_str}</div></div>', unsafe_allow_html=True)
+            with k2:
+                st.markdown(f'<div class="rca-kpi-card"><div class="rca-label">Hierarchy Levels</div><div class="rca-value">{len(st.session_state.rca_hierarchy or [])}</div></div>', unsafe_allow_html=True)
+            with k3:
+                st.markdown(f'<div class="rca-kpi-card"><div class="rca-label">Primary Branches</div><div class="rca-value">{len(result.get("tree_data", []))}</div></div>', unsafe_allow_html=True)
+            with k4:
+                st.markdown(f'<div class="rca-kpi-card"><div class="rca-label">Final Leaf Nodes</div><div class="rca-value">{count_leaf_nodes(result.get("tree_data", []))}</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            col_left, col_right = st.columns(2)
+            with col_left:
+                with st.expander("📋 Executive Summary", expanded=True):
+                    st.info(exec_summary)
+            with col_right:
+                with st.expander("🌳 Recursive Drill-Down Trace", expanded=True):
+                    if result["path_trace"]:
+                        st.caption(result["path_trace"][0])
+                    render_trace_tree(result.get("tree_data", []))
+
+            if rca_text:
+                st.markdown("<br>", unsafe_allow_html=True)
+                with st.expander("🔍 Root Cause Analysis", expanded=True):
+                    st.success(rca_text)
+
+            if comm_text:
+                st.markdown("<br>", unsafe_allow_html=True)
+                with st.expander("💡 Category Commentary", expanded=True):
+                    st.info(comm_text)
+
+            st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+            if st.session_state.rca_run_id:
+                if st.session_state.rca_feedback_submitted:
+                    st.success("Thank you for your feedback! ✅")
+                else:
+                    st.markdown("**How did the AI perform on this analysis?**")
+                    cf1, cf2, _ = st.columns([1, 1, 10])
+                    if cf1.button("👍", key="rca_up"):
+                        update_run_feedback(st.session_state.rca_run_id, 1)
+                        st.session_state.rca_feedback_submitted = True
+                        st.toast("✅ Feedback recorded!")
+                        st.rerun()
+                    if cf2.button("👎", key="rca_down"):
+                        update_run_feedback(st.session_state.rca_run_id, -1)
+                        st.session_state.rca_feedback_submitted = True
+                        st.toast("✅ Feedback recorded!")
+                        st.rerun()
+
+            st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+            st.markdown('<p class="va-section-label">📥 Export</p>', unsafe_allow_html=True)
+            try:
+                ppt_file = generate_ppt_deck(
+                    total_variance=total_var_str,
+                    exec_summary=exec_summary,
+                    rca_text=rca_text,
+                    comm_text=comm_text,
+                    tree_data=result.get("tree_data", [])
+                )
+                if ppt_file:
+                    st.download_button(
+                        "📥 Download AI Deck (.pptx)",
+                        data=ppt_file,
+                        file_name=f"Variance_RCA_{datetime.now().strftime('%Y%m%d')}.pptx",
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    )
+                else:
+                    st.warning("python-pptx not installed. Install it to enable PPTX export.")
+            except Exception as e:
+                st.warning(f"PPTX export unavailable: {e}")
+    else:
+        st.info("Configure your data source above to start the AI root cause analysis.")
+
+# ══════════════════════════════════════════════
+# TAB 4 — CHAT WITH DATA
+# ══════════════════════════════════════════════
+with tab4:
+    st.markdown('<p class="va-section-label">💬 Chat with Your Data</p>', unsafe_allow_html=True)
+
+    chat_df = None
+    chat_src = st.radio(
+        "📂 Data source for Chat",
+        ["Use Variance Analysis Data (master_df)", "Use Pivot/Leaf Data", "Upload file for chat"],
+        horizontal=True,
+        key="chat_src"
+    )
+
+    if chat_src == "Use Variance Analysis Data (master_df)" and st.session_state.master_df is not None:
+        chat_df = st.session_state.master_df
+        st.success(f"✅ Using master dataset — {len(chat_df):,} rows")
+    elif chat_src == "Use Pivot/Leaf Data" and st.session_state.leaf_df is not None:
+        chat_df = st.session_state.leaf_df
+        st.success(f"✅ Using pivot data — {len(chat_df):,} rows")
+    elif chat_src == "Upload file for chat":
+        upl_chat = st.file_uploader("Upload Excel/CSV for chat", type=["xlsx","xls","csv"], key="upl_chat")
+        if upl_chat:
+            if upl_chat.name.endswith(".csv"):
+                chat_df = pd.read_csv(io.BytesIO(upl_chat.getvalue()))
+            else:
+                chat_df = load_excel_cached(upl_chat.getvalue(), upl_chat.name)
+            st.success(f"✅ Loaded — {len(chat_df):,} rows")
+    else:
+        if st.session_state.master_df is not None:
+            chat_df = st.session_state.master_df
+
+    if chat_df is not None:
+        with st.expander(f"Preview chat data — {len(chat_df):,} rows × {len(chat_df.columns)} columns", expanded=False):
+            st.dataframe(chat_df.head(30), use_container_width=True, height=180)
+
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+
+        for idx, msg in enumerate(st.session_state.chat_history):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg["role"] == "assistant" and "db_id" in msg:
+                    if st.session_state.chat_feedback_submitted.get(idx):
+                        st.success("Feedback recorded ✅")
+                    else:
+                        f1, f2, _ = st.columns([1, 1, 10])
+                        if f1.button("👍", key=f"chat_up_{idx}"):
+                            update_chat_feedback(msg["db_id"], 1)
+                            st.session_state.chat_feedback_submitted[idx] = True
+                            st.toast("✅ Feedback recorded!")
+                            st.rerun()
+                        if f2.button("👎", key=f"chat_dn_{idx}"):
+                            update_chat_feedback(msg["db_id"], -1)
+                            st.session_state.chat_feedback_submitted[idx] = True
+                            st.toast("✅ Feedback recorded!")
+                            st.rerun()
+
+        if prompt := st.chat_input("Ask your dataset a question…"):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.chat_message("assistant"):
+                try:
+                    from langchain_core.messages import HumanMessage, SystemMessage
+                    from langchain_openai import AzureChatOpenAI
+                    from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
+                    from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
+
+                    st_callback = StreamlitCallbackHandler(st.container())
+                    llm_chat = AzureChatOpenAI(
+                        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                        api_key=os.getenv("AZURE_OPENAI_KEY"),
+                        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+                        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+                        temperature=0,
+                    )
+                    agent = create_pandas_dataframe_agent(
+                        llm_chat, chat_df, verbose=True,
+                        agent_type="openai-functions",
+                        allow_dangerous_code=True
+                    )
+                    response = agent.invoke({"input": prompt}, {"callbacks": [st_callback]})
+                    answer = response["output"]
+                    st.markdown(answer)
+                    chat_id = save_chat_to_db(prompt, answer)
+                    st.session_state.chat_history.append({"role": "assistant", "content": answer, "db_id": chat_id})
+                    st.rerun()
+                except ImportError:
+                    st.error("LangChain packages not installed. Run: pip install langchain langchain-openai langchain-experimental langchain-community")
+                except Exception as e:
+                    st.error(f"Chat error: {e}")
+    else:
+        st.info("Load a data source above (or run Variance Analysis first) to start chatting.")
+
+# ══════════════════════════════════════════════
+# TAB 5 — RUN HISTORY
+# ══════════════════════════════════════════════
+with tab5:
+    st.markdown('<p class="va-section-label">🗄️ Historical Analysis Runs</p>', unsafe_allow_html=True)
+
+    history_df = fetch_history_from_db()
+    if history_df.empty:
+        st.info("No history found. Run an AI analysis to generate logs.")
+    else:
+        history_df["feedback_status"] = history_df["feedback"].map({1: "👍", -1: "👎", 0: "➖"})
+        st.dataframe(
+            history_df[["id", "timestamp", "filename", "total_variance", "feedback_status"]],
+            use_container_width=True,
+            hide_index=True
+        )
+        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
+        selected_run = st.selectbox("Select a Run ID to view details:", history_df["id"].tolist())
+        if selected_run:
+            run_details = history_df[history_df["id"] == selected_run].iloc[0]
+            st.markdown(f"**Filename:** `{run_details['filename']}` &nbsp;|&nbsp; **Ran at:** `{run_details['timestamp']}`")
+            st.markdown(f"**Feedback:** `{run_details['feedback_status']}`")
+            with st.expander("View Full AI Summary", expanded=True):
+                st.info(run_details["summary"])
