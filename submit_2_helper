@@ -1,0 +1,1124 @@
+import pandas as pd
+import openpyxl
+from datetime import datetime
+import math
+import calendar
+import time
+import re
+import os
+import pandas as pd
+# from UI_2 import log_step
+
+current_year = datetime.now().year
+
+current_date = datetime.now()
+
+if current_date.month >= 4:  # If the current month is April or later
+    financial_year_start = current_date.year
+    financial_year_end = current_date.year + 1
+else:  # If the current month is before April
+    financial_year_start = current_date.year - 1
+    financial_year_end = current_date.year
+
+current_year = f"{financial_year_start}-{str(financial_year_end)[-2:]}"
+    # print(f"Financial Year: {financial_year}")
+
+def find_row_numbers(df):
+    # Convert search terms to lowercase and remove spaces for case-insensitive matching
+    search_terms = [
+        "nissan retail volume", "infiniti retail volume", "datsun retail volume",
+        "registration nissan", "registration infiniti", "registration datsun",
+        "tiv", "market share", "european wholesale volume - nissan",
+        "european wholesale volume - infiniti", "european wholesale volume - datsun",
+        "market share - nissan", "market share - infiniti", "market share - datsun",
+        "opening stock", "nmuk", "nmisa", "nmgr", "production volume",
+        "purchase volume", "total in", "export volume nissan",
+        "export volume - datsun", "export volume - infiniti", "export volume",
+        "wholesale volume total", "renault trucks", "daimler", "renault",
+        "gtr [idg]", "oem volume", "captives", "total out",
+        "scope adjustment", "closing stock"
+    ]
+    search_terms = [term.replace(" ", "").lower() for term in search_terms]
+    
+    # Convert all data in the DataFrame to lowercase strings and remove spaces for case-insensitive searching
+    df_lower = df.apply(lambda x: x.astype(str).str.lower().str.replace(" ", ""))
+
+    # Initialize a dictionary to store row indices for each search term
+    row_indices = {term: df_lower[df_lower.apply(lambda row: term in row.values, axis=1)].index.tolist() for term in search_terms}
+
+    return row_indices
+
+
+
+def search_turnover_in_dataframe(df):
+    # Convert all text in the DataFrame to lowercase for case-insensitive searching
+    df_lower = df.apply(lambda x: x.astype(str).str.lower())
+
+    # Static variables for storing row indices
+    TURNOVER_ROW_INDEX = None
+    SEARCH_RANGE_START = None
+    SEARCH_RANGE_END = None
+
+    # Find the row index where 'turnover' appears in the first four columns
+    for col in df_lower.columns[:4]:
+        turnover_row_index = df_lower[df_lower[col].str.contains('turnover', na=False)].index
+        if not turnover_row_index.empty:
+            TURNOVER_ROW_INDEX = turnover_row_index[0]
+            SEARCH_RANGE_START = TURNOVER_ROW_INDEX
+            SEARCH_RANGE_END = TURNOVER_ROW_INDEX + 22
+            break
+
+    if TURNOVER_ROW_INDEX is None:
+        print("Turnover not found in the first four columns.")
+        return
+
+    # Define search terms
+    search_terms = [
+        'nissan nv', 'nissan bb', 'datsun nv', 'datsun bb','infiniti nv','infiniti bb',
+        'infiniti used cars', 'nissan used cars', 'nissan after sales',
+        'datsun after sales', 'infiniti after sales', 'export nissan',
+        'export datsun', 'export infiniti'
+    ]
+
+    # Initialize dictionary to store row indices for each term
+    term_indices = {term: [] for term in search_terms}
+
+    # Search for each term in the specified range (SEARCH_RANGE_START to SEARCH_RANGE_END)
+    search_range = df_lower.iloc[SEARCH_RANGE_START:SEARCH_RANGE_END]
+    for term in search_terms:
+        for col in search_range.columns:
+            indices = search_range[search_range[col].str.contains(term, na=False)].index.tolist()
+            term_indices[term].extend(indices)
+    return term_indices
+
+
+def find_fmi_row_nv(df):
+    # Convert the first three columns to lowercase if they are of object type
+    df_lower = df.iloc[:, 0:3].apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+    
+    # Find start indices for each term
+    start_index_nissan = df_lower[df_lower.isin(['nissan nv']).any(axis=1)].index
+    start_index_datsun = df_lower[df_lower.isin(['datsun nv']).any(axis=1)].index
+    start_index_infiniti = df_lower[df_lower.isin(['infiniti nv']).any(axis=1)].index
+    start_index_total = df_lower[df_lower.isin(['total nv']).any(axis=1)].index
+    
+    # Check if all terms are found
+    if start_index_nissan.empty or start_index_datsun.empty or start_index_infiniti.empty or start_index_total.empty:
+        raise ValueError("One or more required terms ('nissan nv', 'datsun nv', 'infiniti nv') not found in the specified columns.")
+    
+    # Define a function to find indices within a range
+    def find_indices_in_range(start_index):
+        end_index = start_index + 8
+        fmi_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['FMI']).any(axis=1)].index
+        turnover_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['TurnoverAj']).any(axis=1)].index
+        cos_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['COS Regional']).any(axis=1)].index
+        vme_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['VME']).any(axis=1)].index
+        
+        # Return indices as a tuple if all are found, otherwise return None
+        if not fmi_index.empty and not turnover_index.empty and not cos_index.empty and not vme_index.empty:
+            return (fmi_index[0], turnover_index[0], cos_index[0], vme_index[0])
+        else:
+            return None
+    
+    # Find indices for each term
+    indices_nissan = find_indices_in_range(start_index_nissan[0])
+    indices_datsun = find_indices_in_range(start_index_datsun[0])
+    indices_infiniti = find_indices_in_range(start_index_infiniti[0])
+    indices_total=find_indices_in_range(start_index_total[0])
+    
+    # Check if indices are found for all terms
+    if indices_nissan is None or indices_datsun is None or indices_infiniti is None:
+        raise ValueError("Required indices not found within the specified range for one or more terms.")
+    
+    # Unpack and return all indices
+    return (*indices_nissan, *indices_datsun, *indices_infiniti,*indices_total)
+
+
+
+def find_fmi_row_uc(df):
+    # Convert the first three columns to lowercase if they are of object type
+    df_lower = df.iloc[:, 0:3].apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+    
+    # Find start indices for each term
+    start_index_nissan = df_lower[df_lower.isin(['uc nissan']).any(axis=1)].index
+    start_index_datsun = df_lower[df_lower.isin(['uc infiniti']).any(axis=1)].index
+    start_index_total = df_lower[df_lower.isin(['total uc']).any(axis=1)].index
+    
+    # Check if all terms are found
+    if start_index_nissan.empty or start_index_datsun.empty or  start_index_total.empty:
+        raise ValueError("One or more required terms ('nissan nv', 'datsun nv', 'infiniti nv') not found in the specified columns.")
+    
+    # Define a function to find indices within a range
+    def find_indices_in_range(start_index):
+        end_index = start_index + 8
+        fmi_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['FMI']).any(axis=1)].index
+        turnover_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['TurnoverAj']).any(axis=1)].index
+        cos_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['COS Regional']).any(axis=1)].index
+        vme_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['VME']).any(axis=1)].index
+        
+        # Return indices as a tuple if all are found, otherwise return None
+        if not fmi_index.empty and not turnover_index.empty and not cos_index.empty and not vme_index.empty:
+            return (fmi_index[0], turnover_index[0], cos_index[0], vme_index[0])
+        else:
+            return None
+    
+    # Find indices for each term
+    indices_nissan = find_indices_in_range(start_index_nissan[0])
+    indices_datsun = find_indices_in_range(start_index_datsun[0])
+    indices_total=find_indices_in_range(start_index_total[0])
+    
+    # Check if indices are found for all terms
+    if indices_nissan is None or indices_datsun is None or indices_total is None:
+        raise ValueError("Required indices not found within the specified range for one or more terms.")
+    
+    # Unpack and return all indices
+    return (*indices_nissan, *indices_datsun, *indices_total)
+
+
+
+def find_fmi_row_as(df):
+    # Convert the first three columns to lowercase if they are of object type
+    df_lower = df.iloc[:, 0:3].apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+
+    start_index_nissan = df_lower[df_lower.isin(['as nissan']).any(axis=1)].index
+    start_index_datsun = df_lower[df_lower.isin(['as datsun']).any(axis=1)].index
+    start_index_infiniti = df_lower[df_lower.isin(['as infiniti']).any(axis=1)].index
+    start_index_total = df_lower[df_lower.isin(['total as']).any(axis=1)].index
+
+    if start_index_nissan.empty or start_index_datsun.empty or start_index_infiniti.empty or start_index_total.empty:
+        raise ValueError("One or more required terms ('nissan nv', 'datsun nv', 'infiniti nv') not found in the specified columns.")
+
+    def find_indices_in_range(start_index):
+        end_index = start_index + 8
+        fmi_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['FMI']).any(axis=1)].index
+        turnover_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['TurnoverAj']).any(axis=1)].index
+        cos_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['COS Regional']).any(axis=1)].index
+        vme_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['VME']).any(axis=1)].index
+
+        if not fmi_index.empty and not turnover_index.empty and not cos_index.empty and not vme_index.empty:
+            return (fmi_index[0], turnover_index[0], cos_index[0], vme_index[0])
+        else:
+            return None
+
+    indices_nissan = find_indices_in_range(start_index_nissan[0])
+    indices_datsun = find_indices_in_range(start_index_datsun[0])
+    indices_infiniti = find_indices_in_range(start_index_infiniti[0])
+    indices_total=find_indices_in_range(start_index_total[0])
+    
+    if indices_nissan is None or indices_datsun is None or indices_infiniti is None:
+        raise ValueError("Required indices not found within the specified range for one or more terms.")
+    
+    return (*indices_nissan, *indices_datsun, *indices_infiniti,*indices_total)
+
+
+def find_fmi_row_export(df):
+    # Convert the first three columns to lowercase if they are of object type
+    df_lower = df.iloc[:, 0:3].apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+
+    start_index_nissan = df_lower[df_lower.isin(['nissan export']).any(axis=1)].index
+    start_index_datsun = df_lower[df_lower.isin(['datsun export']).any(axis=1)].index
+    start_index_infiniti = df_lower[df_lower.isin(['infiniti export']).any(axis=1)].index
+    start_index_total = df_lower[df_lower.isin(['total export']).any(axis=1)].index
+
+    if start_index_nissan.empty or start_index_datsun.empty or start_index_infiniti.empty or start_index_total.empty:
+        raise ValueError("One or more required terms ('nissan nv', 'datsun nv', 'infiniti nv') not found in the specified columns.")
+
+    def find_indices_in_range(start_index):
+        end_index = start_index + 8
+        fmi_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['FMI']).any(axis=1)].index
+        turnover_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['TurnoverAj']).any(axis=1)].index
+        cos_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['COS Regional']).any(axis=1)].index
+        vme_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['VME']).any(axis=1)].index
+
+        if not fmi_index.empty and not turnover_index.empty and not cos_index.empty and not vme_index.empty:
+            return (fmi_index[0], turnover_index[0], cos_index[0], vme_index[0])
+        else:
+            return None
+
+    indices_nissan = find_indices_in_range(start_index_nissan[0])
+    indices_datsun = find_indices_in_range(start_index_datsun[0])
+    indices_infiniti = find_indices_in_range(start_index_infiniti[0])
+    indices_total=find_indices_in_range(start_index_total[0])
+    
+    if indices_nissan is None or indices_datsun is None or indices_infiniti is None:
+        raise ValueError("Required indices not found within the specified range for one or more terms.")
+    
+    return (*indices_nissan, *indices_datsun, *indices_infiniti,*indices_total)
+
+
+
+
+def search_omp_terms(df):
+    # Convert all data in the DataFrame to lowercase strings for case-insensitive searching
+    df_lower = df.apply(lambda x: x.astype(str).str.lower())
+    
+    # Initialize turnover_row_index to None
+    turnover_row_index = None
+    
+    # Search for 'omp' in the first four columns to find the turnover row index
+    for col in df_lower.columns[:4]:
+        turnover_row_indices = df_lower[df_lower[col].str.contains('omp', na=False)].index
+        if not turnover_row_indices.empty:
+            turnover_row_index = turnover_row_indices[0]
+            break
+
+    # If no turnover row is found, print a message and return
+    if turnover_row_index is None:
+        print("Turnover not found in the first four columns.")
+        return
+
+    # Define search terms
+    search_terms = [
+        "x83 sales to renault",
+        "f91r sales to renault trucks",
+        "production parts sales to inter-companies",
+        "cantabria sales to third party",
+        "parts sales to renault",
+        "battery plant other costs",
+        "scraps sales",
+        "pensions",
+        "others"
+    ]
+
+    # Initialize dictionary to store row indices for each term
+    term_indices = {term: [] for term in search_terms}
+
+    # Define the search range from turnover_row_index to turnover_row_index + 28
+    search_range = df_lower.iloc[turnover_row_index:turnover_row_index + 28]
+
+    # Search for each term in the specified range
+    for term in search_terms:
+        escaped_term = re.escape(term)  # Escape special characters
+        for col in search_range.columns:
+            indices = search_range[search_range[col].str.contains(escaped_term, na=False)].index.tolist()
+            term_indices[term].extend(indices)
+
+    # Print results
+    # for term, indices in term_indices.items():
+    #     print(f"Indices for '{term}': {indices}")
+
+    return term_indices    
+
+
+def search_manufacturing_terms(df):
+    # Convert all data in the DataFrame to lowercase strings for case-insensitive searching
+    df_lower = df.apply(lambda x: x.astype(str).str.lower())
+    
+    # Initialize turnover_row_index to None
+    turnover_row_index = None
+    
+    # Search for 'manufacturing' in the first four columns to find the turnover row index
+    for col in df_lower.columns[:4]:
+        turnover_row_indices = df_lower[df_lower[col].str.contains('manufacturing', na=False)].index
+        if not turnover_row_indices.empty:
+            turnover_row_index = turnover_row_indices[0]
+            break
+
+    if turnover_row_index is None:
+        print("Turnover not found in the first four columns.")
+        return
+
+    # Define search terms
+    search_terms = [
+        "materials costs",
+        "b/o cost reduction",
+        "renault tp",
+        "intercompany parts / kd",
+        "inbound freight / insurance",
+        "inbound duty",
+        "inhouse / direct labour",
+        "battery (nmuk)",
+        "events",
+        "infiniti mz variable",
+        "other adjustments",
+        "others",
+        "core fixed",
+        "pic (nissan)",
+        "regional cost",
+        "vendor tooling depreciation",
+        "projects",
+        "nesas/nisa manufacturing",
+        "battery fixed",
+        "infiniti fixed cost (gd1a)",
+        "maintenance of existing models (d&d)",
+        "gd1a top position shift to icp",
+        "supplier claims & other",
+        "other adjustments",
+        # "parts sales to renault \\(h4bt camshaft\\)"  # Correctly escaped brackets
+    ]
+
+    # Initialize dictionary to store row indices for each term
+    term_indices = {term: [] for term in search_terms}
+
+    # Define the search range from turnover_row_index to turnover_row_index + 28
+    search_range = df_lower.iloc[turnover_row_index:turnover_row_index + 28]
+
+    # Search for each term in the specified range
+    for term in search_terms:
+        escaped_term = re.escape(term)  # Escape special characters
+        for col in search_range.columns:
+            indices = search_range[search_range[col].str.contains(escaped_term, na=False)].index.tolist()
+            term_indices[term].extend(indices)
+
+    # # Print results
+    # for term, indices in term_indices.items():
+    #     print(f"Indices for '{term}': {indices}")
+
+    return term_indices   
+
+
+
+def find_financial_indices(df):
+    # Convert the first three columns to lowercase strings for case-insensitive searching
+    df_lower = df.iloc[:, 0:3].apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+
+    # Find the starting index for 'g&a'
+    start_index_gna = df_lower[df_lower.isin(['g&a']).any(axis=1)].index
+
+    # Check if the required term is found
+    if start_index_gna.empty:
+        raise ValueError("The required term ('g&a') not found in the specified columns.")
+
+    def find_indices_in_range(start_index):
+        end_index = min(start_index + 24, len(df))  # Ensure end_index does not exceed DataFrame length
+        fmi_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Labour Costs']).any(axis=1)].index
+        turnover_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['IS Costs']).any(axis=1)].index
+        cos_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Depreciation']).any(axis=1)].index
+        vme_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Provision for Doubtful Debts']).any(axis=1)].index
+        overheads_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Overheads']).any(axis=1)].index
+
+        return (fmi_index, turnover_index, cos_index, vme_index, overheads_index)
+
+    indices_gna = find_indices_in_range(start_index_gna[0])
+    return indices_gna
+
+
+
+
+
+def find_month_columns_export(df, month_number):
+    # Define the mapping of month numbers to month codes
+    month_codes = {
+        4: "M01",
+        5: "M02",
+        6: "M03",
+        7: "M04",
+        8: "M05",
+        9: "M06",
+        10: "M07",
+        11: "M08",
+        12: "M09",
+        1: "M10",
+        2: "M11",
+        3: "M12"
+    }
+    
+    # Get the corresponding month code from the month number
+    month_code = month_codes.get(month_number)
+    
+    if not month_code:
+        raise ValueError("Invalid month number provided.")
+    
+    # Initialize a list to store column indices
+    column_indices = []
+    
+    # Iterate over each row in the DataFrame
+    for _, row in df.iterrows():
+        temp_indices = []
+        
+        # Iterate over each cell in the row
+        for col_index, value in enumerate(row):
+            # Check if the cell value matches the month code
+            if isinstance(value, str) and month_code in value:
+                temp_indices.append(col_index)
+                
+                # If occurrences are found, add them to the main list
+                column_indices.extend(temp_indices)
+    
+    # Return sorted list of unique column indices
+    return sorted(set(column_indices))
+
+def find_op_and_month(df, month_number):
+
+    months = ["January", "February", "March", "April", "May", "June", 
+              "July", "August", "September", "October", "November", "December"]
+    
+    if month_number < 1 or month_number > 12:
+        raise ValueError("Month number must be between 1 and 12.")
+    
+    month_name = months[month_number - 1].lower()
+
+    # Initialize variables to store indices
+    op_row_index = None
+    month_col_index = None
+
+    # Iterate over rows to find 'OP'
+    for index, row in df.iterrows():
+        if 'op' in row.astype(str).str.lower().values:
+            op_row_index = index
+            break
+
+    # Find column index for the specified month
+    for col_index, col_name in enumerate(df.columns):
+        if month_name in col_name.lower():
+            month_col_index = col_index
+            break
+
+    return op_row_index, month_col_index
+
+
+
+
+
+def find_month_columns_Relief_KD(df, month_number):
+    # Define the mapping of month numbers to month names
+    month_names = {
+        4: "April",
+        5: "May",
+        6: "June",
+        7: "July",
+        8: "August",
+        9: "September",
+        10: "October",
+        11: "November",
+        12: "December",
+        1: "January",
+        2: "February",
+        3: "March"
+    }
+    
+    # Get the corresponding month name from the month number
+    month_name = month_names.get(month_number)
+    
+    if not month_name:
+        raise ValueError("Invalid month number provided.")
+    
+    # Initialize a list to store column indices
+    column_indices = []
+    
+    # Iterate over each row in the DataFrame
+    for _, row in df.iterrows():
+        temp_indices = []
+        
+        # Iterate over each cell in the row
+        for col_index, value in enumerate(row):
+            # Check if the cell value matches the month name
+            if isinstance(value, str) and month_name in value:
+                temp_indices.append(col_index)
+                
+                # If two occurrences are found, stop searching further in this row
+                if len(temp_indices) == 2:
+                    column_indices.extend(temp_indices)
+                    break
+    
+    # Return sorted list of column indices
+    return sorted(set(column_indices))
+
+
+def find_indices_feuil(df, month_number):
+    # Convert dataframe to lowercase for case-insensitive search using DataFrame.map
+    df_lower = df.apply(lambda row: row.map(lambda x: x.lower() if isinstance(x, str) else x), axis=1)
+    
+    # Find the row index for "ne total"
+    try:
+        row_index = df_lower[df_lower.apply(lambda row: 'ne total' in row.values, axis=1)].index[0]
+    except IndexError:
+        raise ValueError("The term 'NE Total' was not found in the dataframe.")
+    
+    # Create a dictionary mapping month numbers to month names
+    month_dict = {
+        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr",
+        5: "May", 6: "Jun", 7: "Jul", 8: "Aug",
+        9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"
+    }
+    
+    # Get the month name from the dictionary
+    month_name = month_dict.get(month_number)
+    if not month_name:
+        raise ValueError(f"Invalid month number '{month_number}'. Please provide a number between 1 and 12.")
+    
+    # Find the column index for the given month anywhere in the dataframe
+    try:
+        column_index = df_lower.apply(lambda row: month_name.lower() in row.values, axis=1).idxmax()
+    except ValueError:
+        raise ValueError(f"The month '{month_name}' was not found in the dataframe.")
+    
+    return row_index, column_index
+    
+def MZ_Sheet_terms(df):
+    # Convert all data in the DataFrame to lowercase strings for case-insensitive searching
+    df_lower = df.apply(lambda x: x.astype(str).str.lower())
+    turnover_row_index = None
+    
+    # Search for 'turnover oem/ omp' in the first four columns to find the turnover row index
+    for col in df_lower.columns[:4]:
+        turnover_row_indices = df_lower[df_lower[col].str.contains('turnover oem/ omp', na=False)].index
+        if not turnover_row_indices.empty:
+            turnover_row_index = turnover_row_indices[0]
+            break
+
+    # If no turnover row is found, print a message and return
+    if turnover_row_index is None:
+        print("Turnover not found in the first four columns.")
+        return
+    
+    # Define search terms, ensuring spaces and special characters are handled
+    search_terms = [
+        "x83 sales to renault",
+        "sales to renault trucks",
+        "production parts sales to inter-companies",
+        "cantabria sales to third party",
+        "parts sales to renault (h4bu camshaft)",  # Parentheses are included directly
+        "scrap sales",
+        "battery plant to",
+        "others",
+        "other adjustments",
+    ]
+
+    # Initialize dictionary to store row indices for each term
+    term_indices = {term: [] for term in search_terms}
+
+    # Define the search range from turnover_row_index to turnover_row_index + 28
+    search_range = df_lower.iloc[turnover_row_index:turnover_row_index + 10]
+    
+    # Search for each term in the specified range
+    for term in search_terms:
+        escaped_term = re.escape(term)  # Escape special characters
+        for col in search_range.columns:
+            indices = search_range[search_range[col].str.contains(escaped_term, na=False)].index.tolist()
+            term_indices[term].extend(indices)
+
+    # Print results
+    # for term, indices in term_indices.items():
+    #     print(f"Indices for '{term}': {indices}")
+
+    return term_indices
+
+
+def find_outside_profit_1(df):
+    # Clean the DataFrame: remove spaces and convert to lowercase
+    cleaned_df = df.applymap(lambda x: str(x).replace(" ", "").lower())
+
+    # Define the search term
+    search_term = "outsideprofit"
+
+    # Initialize variables to store the result
+    row_number = None
+    column_number = None
+
+    # Iterate over each cell in the DataFrame
+    for row_idx, row in cleaned_df.iterrows():
+        for col_idx, value in row.items():
+            if value == search_term:
+                row_number = row_idx
+                column_number = col_idx
+                break
+        if row_number is not None and column_number is not None:
+            break
+
+    # Return the row and column numbers
+    return row_number, column_number
+
+
+
+
+
+
+
+def find_oem_terms(df):
+    # Convert the first three columns to lowercase strings for case-insensitive searching
+    df_lower = df.iloc[:, 0:3].apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+
+    # Find the starting index for 'g&a'
+    start_index_gna = df_lower[df_lower.isin(['oem']).any(axis=1)].index
+
+    # Check if the required term is found
+    if start_index_gna.empty:
+        raise ValueError("The required term ('g&a') not found in the specified columns.")
+
+    def find_indices_in_range(start_index):
+        end_index = min(start_index + 24, len(df))  # Ensure end_index does not exceed DataFrame length
+        turnover_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Turnover']).any(axis=1)].index
+        standard_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Standard Cost']).any(axis=1)].index
+        marginal_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Marginal Profit']).any(axis=1)].index
+        vehicle_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Vehicle enhancement']).any(axis=1)].index
+        logistics_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Logistics']).any(axis=1)].index
+        royalty_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Royalty']).any(axis=1)].index
+        others_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['Others']).any(axis=1)].index
+        EOP_index = df.iloc[start_index:end_index][df.iloc[start_index:end_index].isin(['EOP']).any(axis=1)].index
+
+        return (turnover_index, standard_index, marginal_index, vehicle_index, logistics_index,royalty_index,others_index,EOP_index)
+
+    indices_gna = find_indices_in_range(start_index_gna[0])
+    return indices_gna    
+
+def find_ocs_terms(df):
+    # Convert the first three columns to lowercase strings for case-insensitive searching
+    df_lower = df.iloc[:, 0:3].apply(lambda col: col.str.lower() if col.dtype == 'object' else col)
+
+    start_index_gna = df_lower[df_lower.isin(['ocs']).any(axis=1)].index
+
+
+    if start_index_gna.empty:
+        raise ValueError("The required term ('g&a') not found in the specified columns.")
+
+    return start_index_gna    
+
+def search_rd_terms(df):
+    # Convert all data in the DataFrame to lowercase strings for case-insensitive searching
+    df_lower = df.apply(lambda x: x.astype(str).str.lower())
+    
+    # Define search terms
+    search_terms = [
+        "functional r&d",
+        "non functional r&d"
+    ]
+
+    term_indices = {term: [] for term in search_terms}
+
+    # Search for each term in the DataFrame
+    for term in search_terms:
+        for col in df_lower.columns:
+            indices = df_lower[df_lower[col].str.contains(term, na=False)].index.tolist()
+            term_indices[term].extend(indices)
+
+    # Print results
+    # for term, indices in term_indices.items():
+    #     print(f"Indices for '{term}': {indices}")
+
+    return term_indices
+def find_R_and_D_File(df):
+  
+    df_lower = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+    
+    last_index = df.index[-1]
+    
+    # Define the range for searching other terms
+    start_index = last_index- 15
+    end_index = last_index 
+    
+    # Terms to search for
+    terms = [
+        "functional r&d revenue",
+        "functional r&d cost",
+        "non functional r&d revenue",
+        "non functional r&d cost"
+    ]
+    
+    # Static variables to store indices
+    indices_dict = {}
+    
+    # Search for each term within the defined range
+    for term in terms:
+        term_indices = df_lower.iloc[start_index:end_index][df_lower.isin([term]).any(axis=1)].index.tolist()
+        indices_dict[term] = term_indices
+    
+    return indices_dict
+
+
+def find_transfer_price_adjustment(df):
+    term = "nrv"
+    search_term = re.sub(r'\s+', '', term.lower())
+    df_lower = df.applymap(lambda x: re.sub(r'\s+', '', x.lower()) if isinstance(x, str) else x)
+    indices = df_lower[df_lower.apply(lambda row: row.astype(str).str.contains(search_term, regex=True).any(), axis=1)].index.tolist()
+    return indices
+
+import pandas as pd
+import re
+
+def export_ITP_Export(df):
+
+    term = "ITP ( Revenue )"
+    # Escape special characters and remove spaces for consistent matching
+    search_term = re.escape(term.lower()).replace(r'\ ', '')
+
+    # Convert all string elements in the DataFrame to lowercase and remove spaces
+    df_lower = df.applymap(lambda x: re.sub(r'\s+', '', x.lower()) if isinstance(x, str) else x)
+
+    # Find indices of rows containing the search term
+    indices = df_lower[df_lower.apply(lambda row: row.astype(str).str.contains(search_term, regex=True).any(), axis=1)].index.tolist()
+
+    return indices
+
+
+def energy_tgk_68(df):
+
+    term = "Energy Business (not inside AS for BP)"
+    # Escape special characters and remove spaces for consistent matching
+    search_term = re.escape(term.lower()).replace(r'\ ', '')
+
+    # Convert all string elements in the DataFrame to lowercase and remove spaces
+    df_lower = df.applymap(lambda x: re.sub(r'\s+', '', x.lower()) if isinstance(x, str) else x)
+
+    # Find indices of rows containing the search term
+    indices = df_lower[df_lower.apply(lambda row: row.astype(str).str.contains(search_term, regex=True).any(), axis=1)].index.tolist()
+
+    return indices
+
+
+def tax_and_public(df):
+    term = "tax and public dues - other tax and public dues"
+    search_term = term.lower()
+    df_lower = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+    indices = df_lower[df_lower.apply(lambda row: row.astype(str).str.contains(search_term).any(), axis=1)].index.tolist()
+    return indices    
+
+def operating_profit(df):
+    term = "operating profit - aprite"
+    search_term = term.lower()
+    df_lower = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+    indices = df_lower[df_lower.apply(lambda row: row.astype(str).str.contains(search_term).any(), axis=1)].index.tolist()
+    return indices   
+
+
+
+
+def find_row_numbers_relief(df, row_limit=150):
+    df_limited = df.head(row_limit)
+    MZ_Impairement = "MZ Impairment"
+    MZ_Impairement = df_limited[df_limited.apply(lambda row: term_nmuk in str(row), axis=1)].index.tolist()
+    return MZ_Impairement
+
+
+def relief_search_terms_new(df):
+    # Define the search terms with proper formatting
+    search_terms = [
+        "recall service/campaigns",
+        "kd itp (nmuk)",
+        "kd itp (nmisa)",
+        "kd itp (nmgr)",
+        "connectivity",
+        "itp cbu nissan",
+        "itp cbu infiniti",
+        "iln export (nmuk)",
+        "iln export (nmisa)",
+        "error correction in mz (?)",
+        "export",
+        "mz impairment",
+        "g&a impairment",
+        "compact ev/vt impairment",
+        "battery 40 kw itp ( nmuk )",
+        "battery 40 kw itp ( nmisa )",
+        "battery cancelation",
+        "error correction in mz (after wd5)",
+        "top daimler correction (after wd5)",
+        "infiniti fmi correction (after wd5)"
+    ]
+    search_df = df.iloc[70:].apply(lambda x: x.astype(str).str.lower().str.replace(r'\s+', '', regex=True))
+    results = {}
+    
+    # Preprocess search terms to remove spaces and handle special characters
+    processed_terms = [term.replace(' ', '').replace('(', r'\(').replace(')', r'\)').replace('?', r'\?') for term in search_terms]
+
+    # Iterate over each search term to find its occurrence in the dataframe
+    for term, processed_term in zip(search_terms, processed_terms):
+        # Find the index of the first occurrence of the term in any row
+        row_index = search_df[search_df.apply(lambda row: row.str.contains(processed_term, regex=True).any(), axis=1)].index
+        
+        # Store the result in the dictionary, indicating 'Not found' if no occurrence is found
+        results[term] = row_index[0] if not row_index.empty else 'Not found'
+
+    # # Print the results for each term
+    # for term, index in results.items():
+    #     print(f"'{term}' found at row: {index}")
+    
+    return results
+
+
+def find_outside_profit_and_month_value(df, month_number):
+    # Adjust the month index to start from April
+    adjusted_month_index = (month_number - 4) % 12
+    
+    # Define the search term
+    search_term = "outsideprofit"
+    
+    for row_index, row in df.iterrows():
+        for col_index, value in enumerate(row):
+            # Clean the value: remove spaces and convert to lowercase
+            cleaned_value = str(value).replace(" ", "").lower()
+            
+            if cleaned_value == search_term:
+                # Calculate the target column index based on the adjusted month index
+                target_col_index = col_index + adjusted_month_index
+                month_value = df.iloc[0, target_col_index]
+                
+                return row_index + 1, col_index + adjusted_month_index
+    
+    return None, None    
+
+def find_second_column_for_outside_profit(df,month_number):
+    # Define the search term
+    search_term = "outsideprofit"
+    adjusted_month_index = (month_number - 4) % 12
+    
+    # Initialize a counter to track occurrences
+    occurrence_count = 0
+    
+    for row_index, row in df.iterrows():
+        for col_index, value in enumerate(row):
+            # Clean the value: remove spaces and convert to lowercase
+            cleaned_value = str(value).replace(" ", "").lower()
+            
+            if cleaned_value == search_term:
+                occurrence_count += 1
+                if occurrence_count == 2:
+                    return row_index + 1, col_index + adjusted_month_index
+    
+    return None, None
+
+def G_and_A_Reliev1(df):
+    fmi_row = df[df.apply(lambda row: row.astype(str).str.lower().str.startswith('meur').any(), axis=1)].index
+    # print(f"'meur' found at row: {fmi_row[0] if not fmi_row.empty else 'Not found'}")
+    return fmi_row[0] if not fmi_row.empty else None 
+
+def extract_value_from_v8(file_name, month_number):
+    # Define a dictionary to map month numbers to their abbreviations
+    month_abbr = {
+        1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
+        5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug',
+        9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+    }
+    
+    # Validate the month_number input
+    if month_number not in month_abbr:
+        raise ValueError("Invalid month number. Please provide a number between 1 and 12.")
+    
+    # Derive the sheet name using the month abbreviation
+    sheet_name = f"HFM {month_abbr[month_number]}"
+    print(sheet_name)
+    
+    try:
+        df_current = pd.read_excel(file_name, sheet_name=sheet_name, engine='openpyxl')
+        if len(df_current.columns) > 21:
+            column_name_21 = df_current.columns[21]
+            print(f"Column name at index 21: {column_name_21}")
+            value_current = df_current.at[6, column_name_21]
+            
+            # For April, return the value directly
+            if month_number == 4:
+                return value_current
+            
+            # For other months, calculate the difference with the previous month's V8
+            previous_month_number = month_number - 1 if month_number > 1 else 12
+            previous_sheet_name = f"HFM {month_abbr[previous_month_number]}"
+            print(previous_sheet_name)
+            
+            df_previous = pd.read_excel(file_name, sheet_name=previous_sheet_name, engine='openpyxl')
+            value_previous = df_previous.at[6, column_name_21]
+            
+            return value_current - value_previous
+        else:
+            raise ValueError("The specified column index 21 does not exist in the current sheet.")
+    
+    except Exception as e:
+        raise RuntimeError(f"An error occurred while extracting data from {sheet_name}: {e}")
+
+def generate_excel_formula(row_num, col_num, sheet_name=None, file_name=None):
+    # if file_name:
+    #     parts = file_name.rsplit("\\", 1)
+    #     # file_path_with_bracket = f"[{parts[1]}]"
+    #     file_name=parts[1]
+    #     print(file_name)
+
+    excel_row = row_num + 2
+    excel_column = col_num + 1
+    # print(col_num)
+    def column_letter(col_num):
+        letter = ''
+        while col_num > 0:
+            col_num, remainder = divmod(col_num - 1, 26)
+            letter = chr(65 + remainder) + letter
+        return letter
+    
+    excel_col_letter = column_letter(excel_column)
+
+    if file_name and sheet_name:
+        corrected_file_name = file_name.replace("\\", "/")
+        formula = f"='[{corrected_file_name}]{sheet_name}'!{excel_col_letter}{excel_row}"
+    elif sheet_name:
+        formula = f"='{sheet_name}'!{excel_col_letter}{excel_row}"
+    else:
+        formula = f"={excel_col_letter}{excel_row}"
+    
+    return formula
+
+
+def extract_numeric_from_column_name(column_name):
+
+        numeric_part = re.sub(r'\D', '', column_name)
+        return numeric_part
+
+def extract_formula(file_path, sheet_name, row_number, column_index):
+
+        try:
+            # Load workbook and select sheet
+            workbook = openpyxl.load_workbook(file_path, data_only=False)
+            sheet = workbook[sheet_name]
+
+            # Access the cell using row and column index
+            cell = sheet.cell(row=row_number, column=column_index + 1)  # openpyxl is 1-indexed
+
+            # Extract and print the formula
+            formula = cell.value if isinstance(cell.value, str) and cell.value.startswith('=') else cell.value
+            # print(f"Formula at row {row_number}, column index {column_index}: {formula}")
+
+            return formula
+        except KeyError:
+            print("Invalid sheet name provided.")
+        except IndexError:
+            print("Invalid row or column index provided.")
+
+
+
+
+
+def extract_value_formula_latest(file_name, month_number):
+
+    month_abbr = {
+        1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
+        5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug',
+        9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+    }
+    
+    # Validate the month_number input
+    if month_number not in month_abbr:
+        raise ValueError("Invalid month number. Please provide a number between 1 and 12.")
+    
+    # Derive the sheet name using the month abbreviation
+    sheet_name = f"HFM {month_abbr[month_number]}"
+    
+    try:
+        df_current = pd.read_excel(file_name, sheet_name=sheet_name, engine='openpyxl')
+        if len(df_current.columns) > 21:
+            column_name_21 = df_current.columns[21]
+            
+            # Generate Excel formula for the current month's value
+            excel_row = 6 + 2
+            excel_column = 21 + 1
+            
+            def column_letter(col_num):
+                letter = ''
+                while col_num > 0:
+                    col_num, remainder = divmod(col_num - 1, 26)
+                    letter = chr(65 + remainder) + letter
+                return letter
+            
+            excel_col_letter = column_letter(excel_column)
+            corrected_file_name = file_name.replace("\\", "/")
+            formula_current = f"='[{corrected_file_name}]{sheet_name}'!{excel_col_letter}{excel_row}"
+            
+            # For April, return the formula directly
+            if month_number == 4:
+                return (formula_current)
+            
+            # For other months, generate formula for difference with previous month's V8
+            previous_month_number = month_number - 1 if month_number > 1 else 12
+            previous_sheet_name = f"HFM {month_abbr[previous_month_number]}"
+            
+            formula_previous = f"='[{corrected_file_name}]{previous_sheet_name}'!{excel_col_letter}{excel_row}"
+            
+            return f"(({formula_current[1:]} - {formula_previous[1:]})"
+        else:
+            raise ValueError("The specified column index 21 does not exist in the current sheet.")
+    
+    except Exception as e:
+        raise RuntimeError(f"An error occurred while extracting data from {sheet_name}: {e}")
+
+from openpyxl import load_workbook
+
+
+def manage_sheet_visibility(file_name, month_number):
+ 
+    month_abbr = {
+        1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
+        5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug',
+        9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+    }
+    
+    # Validate the month_number input
+    if month_number not in month_abbr:
+        raise ValueError("Invalid month number. Please provide a number between 1 and 12.")
+    
+    # Derive current and previous sheet names
+    current_sheet_name = f"HFM {month_abbr[month_number]}"
+    previous_month_number = month_number - 1 if month_number > 1 else 12
+    previous_sheet_name = f"HFM {month_abbr[previous_month_number]}"
+    
+    try:
+        # Load workbook
+        workbook = load_workbook(filename=file_name)
+        
+        # Unhide the current month's sheet
+        if current_sheet_name in workbook.sheetnames:
+            workbook[current_sheet_name].sheet_state = 'visible'
+        else:
+            raise ValueError(f"Sheet '{current_sheet_name}' does not exist in the workbook.")
+        
+        # Hide the previous month's sheet
+        if previous_sheet_name in workbook.sheetnames:
+            workbook[previous_sheet_name].sheet_state = 'hidden'
+        
+        # Save changes to workbook
+        workbook.save(filename=file_name)
+        
+        return f"Unhid '{current_sheet_name}' and hid '{previous_sheet_name}'."
+    
+    except Exception as e:
+        raise RuntimeError(f"An error occurred while managing sheet visibility: {e}")
+
+
+
+def generate_excel_formula_249(month_number, file_path):
+    # Insert a bracket after the last backslash before the file name
+    parts = file_path.rsplit("\\", 1)
+    # file_path_with_bracket = f"{parts[0]}\\[{parts[1]}]Master"
+    file_path_with_bracket = "Master"
+
+    # Calculate the column letter based on the month number
+    start_column_index = 2 * 26 + 14 
+    column_index = start_column_index + month_number - 4
+    column_letter = chr((column_index - 1) // 26 + ord('A')) + chr((column_index - 1) % 26 + ord('A'))
+
+    # Construct the Excel formula
+    formula = (
+        f"=SUMIF('{file_path_with_bracket}'!$X:$X,\"Infiniti\",'{file_path_with_bracket}'!{column_letter}:{column_letter})/"
+        f"'{file_path_with_bracket}'!{column_letter}$1*1000"
+    )
+    
+    return formula
+
+
+def paste_values_KPI_PL(original_file_path, sheet_names, cell_updates_list, month_name,output_path):
+    workbook = openpyxl.load_workbook(original_file_path)
+ 
+    for sheet_name, cell_updates in zip(sheet_names, cell_updates_list):
+        sheet = workbook[sheet_name]
+ 
+        for update in cell_updates:
+            row, column,  formula_or_string = update
+            cell = sheet.cell(row=row, column=column)
+            
+            if formula_or_string is not None:
+                if isinstance(formula_or_string, str) and formula_or_string.startswith('='):
+                    cell.value = formula_or_string
+                else:
+                    cell.value = formula_or_string
+
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    month_name = calendar.month_name[month_name]
+
+    new_file_path=f'FY25 P&L Summary {month_name}_output_FY{current_year}.xlsx'
+    result=output_path + "\\"+ new_file_path
+    print("here ",result)
+
+    
+    new_file_path = os.path.join(os.getcwd(), 'P_and_L Actuals Files', f'FY25 P&L Summary {month_name}_output_FY{current_year}.xlsx')
+    new_file_path_1 = os.path.join(os.getcwd(), 'Mandatory_folder', f'FY25 P&L Summary {month_name}_output_FY{current_year}.xlsx')
+    print(f'Values and strings/formulas pasted and saved to: {new_file_path} and {new_file_path_1}')
+    print(f'Values and strings/formulas pasted and saved to: {new_file_path} and {new_file_path_1}') 
+
+    # workbook.save(new_file_path)
+    workbook.save(result)
+    return new_file_path,result
