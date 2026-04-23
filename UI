@@ -1,0 +1,939 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox,simpledialog
+import threading
+import time
+import logging
+import io
+import os
+import pandas as pd
+from Submit_2 import calculate_alternate_value_1
+from ACT import ACT
+from datetime import datetime
+from utils.logger import logger
+from tkinter import messagebox
+import openpyxl
+import msoffcrypto
+import shutil
+import os
+
+logger.info("UI triggered")
+
+base_dir = os.getcwd()
+stop_thread = False
+
+
+def browse_folder():
+    logging.info("Browse for input folder.")
+    log_step("Browse for input folder")
+    folder_path = filedialog.askdirectory()
+    file_path_entry.delete(0, tk.END)
+    file_path_entry.insert(0, folder_path)
+
+def browse_folder_1():
+    logging.info("Browse for output folder.")
+    log_step("Browse for output folder")
+    folder_path = filedialog.askdirectory()
+    output_path_entry.delete(0, tk.END)
+    output_path_entry.insert(0, folder_path)
+    
+
+def validate_inputs():
+    logging.info("Checking for valid Input.")
+    log_step("Checking for valid Input.")
+    if not file_path_entry.get() or not  output_path_entry.get() or not converter_var_entry.get() or month_dropdown.current() == -1 or not converter_cfmi.get() or not cafe_penalty_var.get() or not connectivity_var.get() or not ePWR_var.get() or not converter_mEUR.get() or not converter_bJPY.get():
+        messagebox.showerror("Input Error", "All fields are mandatory.")
+        return False
+    return True
+
+def determine_fiscal_year(selected_month):
+    logging.info("Checking for valid Month.")
+    current_year = time.localtime().tm_year
+    fiscal_year_start_month = 4  # April is the start of the fiscal year
+    if selected_month < fiscal_year_start_month:
+        fiscal_year = current_year - 1
+    else:
+        fiscal_year = current_year
+    return fiscal_year
+
+
+
+def update_excel_converter():
+    try:
+        # Define the file path for the Excel file
+        file_path = os.path.join(os.getcwd(), 'Mandatory_folder', 'currency_converter.xlsx').replace("\\", "/")
+
+        # Get the current year
+        current_year = pd.Timestamp.now().year
+
+        # Define month names
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+        # Retrieve the selected month index from the dropdown
+        month_index = month_dropdown.current()
+
+        # Retrieve user input from entry field
+        user_input = converter_var_entry.get()
+
+        # Load the Excel file into a DataFrame
+        df = pd.read_excel(file_path)
+
+        # Convert input to float and update DataFrame at the correct month column
+        df.at[0, months[month_index]] = float(user_input)
+
+        # Save updated DataFrame back to Excel file
+        df.to_excel(file_path, index=False)
+
+        # Log success message
+        log_step("Converter file has been successfully updated", tag='step')
+    except ValueError:
+        # Show error message if input is invalid
+        messagebox.showerror("Invalid Input", "Please enter a valid number.")
+    except PermissionError:
+        # Handle file permission error
+        messagebox.showerror("Permission Error", "Unable to write to the converter file. Please check if the file is open or if you have write permissions.")
+    except Exception as e:
+        # Handle any other exceptions
+        messagebox.showerror("Error", f"An unexpected error occurred: {str(e)}")
+import openpyxl
+# import msoffcrypto
+from openpyxl.workbook.protection import WorkbookProtection
+
+from openpyxl import load_workbook
+
+
+
+def copy_master_sheet(file_path_1, file_path_2, password):
+    try:
+        # Read the 'Master' sheet from file_path_1 using pandas
+        df = pd.read_excel(file_path_1, sheet_name='Master', engine='openpyxl')
+        
+        # Load the workbook from file_path_2 with write access
+        wb2 = load_workbook(file_path_2, read_only=False)
+        
+        # Set workbook protection with a password
+        wb2.security = WorkbookProtection(workbookPassword=password, lockStructure=True)
+        
+       
+        # Create a new sheet named 'Master' in file_path_2
+        new_master_sheet = wb2.create_sheet(title='Master')
+        
+        # Add a blank row before writing the DataFrame values
+        blank_row_index = 1
+        
+        # Write column headers to the new 'Master' sheet
+        for c_idx, column_name in enumerate(df.columns):
+            new_master_sheet.cell(row=1, column=c_idx + 1, value=column_name)
+        
+        # Write the DataFrame values to the new 'Master' sheet starting after the blank row and column headers
+        for r_idx, row in df.iterrows():
+            for c_idx, value in enumerate(row):
+                new_master_sheet.cell(row=r_idx + 2, column=c_idx + 1, value=value)
+        
+        # Save the changes to file_path_2
+        wb2.save(file_path_2)
+    except Exception as e:
+        # Log and display error message
+        logging.info(f"Calculation not completed.")
+        log_step("Calculation not completed ,please re-run after correcting the error", 'error')
+        # logging.info("Calculation not completed successfully.")
+        logging.info(f"An error occurred: {str(e)}")
+        var_failure=True
+        progress_bar.stop()
+        save_message_label.config(
+            text=f"Error: {str(e)}",
+            fg="red"
+        )       
+
+
+
+def copy_excel_file(source_path, destination_folder):
+    try:
+        # Verify if the source file exists
+        if not os.path.exists(source_path):
+            raise FileNotFoundError("The specified source file does not exist.")
+        
+        # Ensure the destination folder exists
+        if not os.path.exists(destination_folder):
+            os.makedirs(destination_folder)
+        
+        # Extract the file name from the source path
+        file_name = os.path.basename(source_path)
+        
+        # Initialize destination path
+        destination_path = os.path.join(destination_folder, file_name)
+        
+        # Check if a file with the same name already exists and modify the file name if necessary
+        base_name, extension = os.path.splitext(file_name)
+        counter = 1
+        while os.path.exists(destination_path):
+            destination_path = os.path.join(destination_folder, f"{base_name}_{counter}{extension}")
+            counter += 1
+        
+        # Copy the file to the destination folder
+        shutil.copy2(source_path, destination_path)
+        
+        print(f"File copied successfully to {destination_path}")
+        
+        # Return the path of the copied file
+        return destination_path
+    
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+
+
+
+def submit_action_2():
+    global stop_thread
+    
+    # Get the current month name
+    # current_month = datetime.now().strftime("%B")
+    selected_month = month_dropdown.get()
+    
+    # Show a pop-up alert
+    response = messagebox.askokcancel(
+        "Data Check",
+        f"Please ensure HFM {selected_month} data is populated before running the tool."
+    )
+    
+    # If user clicks 'OK', proceed with the action
+    if not response:
+        return
+    
+    if not validate_inputs():
+        return
+    
+    # Disable buttons during processing
+    toggle_buttons(False)
+
+    # Reset stop flag and start progress bar
+    stop_thread = False
+    
+    # Make progress bar and label visible
+    progress_bar.pack()
+    save_message_label.pack()
+    
+    progress_bar.start()
+
+    # Start elapsed time tracking in a separate thread
+    threading.Thread(target=update_elapsed_time, daemon=True).start()
+
+    # Start backend calculation in a separate thread
+    threading.Thread(target=perform_calculation_2, daemon=True).start()
+    threading.Thread(target=update_excel_converter, daemon=True).start()
+
+    # Log the start of the process
+    log_step("Started generating P&L and NEW KPI Actuals files...", tag='step')
+    save_message_label.config(text="Processing... Please wait.")
+
+def read_xlsx_openpyxl(path: str,
+                       sheet_name=None,
+                       password: str | None = None,
+                       return_all_sheets: bool = False):
+    try:                   
+
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Excel file not found: {path}")
+
+        # Only support OOXML formats here
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".xlsx", ".xlsm"):
+            raise ValueError(f"Unsupported extension for openpyxl: {ext}. Use .xlsx/.xlsm.")
+
+        # Fix any HTML-escaped ampersands that might slip in from a UI
+        if isinstance(sheet_name, str):
+            sheet_name = sheet_name.replace("&amp;", "&")
+
+        # Check encryption first
+        with open(path, "rb") as f:
+            office_file = msoffcrypto.OfficeFile(f)
+            is_encrypted = getattr(office_file, "is_encrypted", False)
+
+            if is_encrypted:
+                if not password:
+                    raise ValueError("This workbook is encrypted. Provide `password=` to open it.")
+                # Decrypt into memory
+                buf = io.BytesIO()
+                office_file.load_key(password=password)  # you can add verify_password=True if needed
+                office_file.decrypt(buf)
+                buf.seek(0)
+
+                # Read with openpyxl from the decrypted buffer
+                return pd.read_excel(
+                    buf,
+                    sheet_name=(None if return_all_sheets else sheet_name),
+                    engine="openpyxl"
+                )
+            else:
+                # Not encrypted: read directly with openpyxl
+                return pd.read_excel(
+                    path,
+                    sheet_name=(None if return_all_sheets else sheet_name),
+                    engine="openpyxl"
+                )
+    except Exception as e:
+        # Log and display error message
+        logging.info(f"Calculation not completed.")
+        log_step("Calculation not completed ,please re-run after correcting the error", 'error')
+        # logging.info("Calculation not completed successfully.")
+        logging.info(f"An error occurred: {str(e)}")
+        var_failure=True
+        progress_bar.stop()
+        save_message_label.config(
+            text=f"Error: {str(e)}",
+            fg="red"
+        )       
+            
+
+
+def perform_calculation_2():
+    missing_sheets_info = []
+    logging.info("Reading input values. Starting perform_calculation_2")
+    log_step("Reading input values. Started calculation process...")
+    global stop_thread
+    # stop_thread = True
+    start_time = time.time()  # Start time calculation
+
+    folder_path = file_path_entry.get()
+    output_path=output_path_entry.get()
+    print(output_path)
+    selected_month = month_dropdown.current() + 1
+    fiscal_year = determine_fiscal_year(selected_month)
+    var_ePWR = ePWR_var.get()
+    var_cfmi = converter_cfmi.get()
+    var_converter=converter_var_entry.get()
+    var_connectivity = connectivity_var.get()
+    var_cafe_penalty = cafe_penalty_var.get()
+    var_converter_bJPY=converter_bJPY.get()
+    var_converter_mEUR=converter_mEUR.get()
+    var_cfmi = float(var_cfmi)
+    var_cfmi = -(var_cfmi) / 10**6
+    # print(var_cfmi)
+    logging.info(f"CFMI value inserted: {var_cfmi}")
+    log_step(f"CFMI value inserted: {var_cfmi}")
+
+    var_converter = float(var_converter)
+    var_ePWR = float(var_ePWR)
+    var_connectivity = float(var_connectivity)
+    var_connectivity = -(var_connectivity)/ 10**6
+    var_cafe_penalty = float(var_cafe_penalty)
+    var_cafe_penalty = (var_cafe_penalty) 
+    # print(var_converter)
+    logging.info(f"var_converter value inserted: {var_converter}")
+    progress_bar.start()
+    
+    current_year = datetime.now().year
+    current_date = datetime.now()
+
+    if current_date.month >= 4:  # If the current month is April or later
+        financial_year_start = current_date.year
+        financial_year_end = current_date.year + 1
+    else:  # If the current month is before April
+        financial_year_start = current_date.year - 1
+        financial_year_end = current_date.year
+
+    financial_year = f"{financial_year_start}-{str(financial_year_end)[-2:]}"
+    # print(f"Financial Year: {financial_year}")
+
+    file_paths = {
+        "P&L Summary": None,
+        "OSP Calc Tool": None,
+        "HFM Managerial P&L": None,
+        "New KPI P&L": None,
+        "HQ items": None,
+        "Goodwill": None,
+        "OSP TGK": None,
+        "High_Level_Variance": None,
+        "Relief_KD": None,
+        "Purchase_Price": None,
+        "UP_Calc_Template_Simulation": None,
+        "NANO_HFM": None,
+        "ITP": None
+    }
+
+    if selected_month == 4:
+        file_path_template = os.path.join(base_dir, 'Mandatory_folder', 'FY25_P_L_Summary_March_template.xlsx')
+        file_path_template_1 = os.path.join(base_dir, 'Mandatory_folder', 'New_KPI_P&L_FY25_Actual_New_OSP_template.xlsx')
+        file_path_template_man_1 = os.path.join(base_dir, 'Mandatory_folder', 'New_KPI_P&L_FY25_Actual_New_OSP_template.xlsx')
+        file_path_template_man = os.path.join(base_dir, 'Mandatory_folder', 'FY25_P_L_Summary_March_template.xlsx')
+        file_path_goodwill_template = os.path.join(base_dir, 'Mandatory_folder', 'Goodwill_template.xlsx')
+    else:
+        # file_path_template = os.path.join(base_dir, 'P_and_L Actuals Files', f'FY25_P_L_Summary_{month_dropdown["values"][month_dropdown.current() - 1]}_output_FY{current_year}.xlsx')
+        # file_path_template_1 = os.path.join(base_dir, 'New KPI Files', f'NEW_KPI_P&L_{month_dropdown["values"][month_dropdown.current() - 1]}_output_FY{current_year}.xlsx')
+        file_path_template_man_1 = os.path.join(base_dir, 'Mandatory_folder', 'New_KPI_P&L_FY25_Actual_New_OSP_template.xlsx')
+        file_path_template_man = os.path.join(base_dir, 'Mandatory_folder', 'FY25_P_L_Summary_March_template.xlsx')
+        file_path_goodwill_template = os.path.join(base_dir, 'Goodwill_files', f'Goodwill_{month_dropdown["values"][month_dropdown.current() - 1]}_output_FY{financial_year}.xlsx')
+
+    for filename in os.listdir(folder_path):
+        if "P&L Summary" in filename:
+            file_paths["P&L Summary"] = os.path.join(folder_path, filename)
+            logging.info(f"P&L Summary file path: {file_paths['P&L Summary']}")
+            log_step(f"P&L Summary file path: {file_paths['P&L Summary']}")
+        elif "OSP Calc Tool" in filename:
+            file_paths["OSP Calc Tool"] = os.path.join(folder_path, filename)
+            logging.info(f"OSP Calc Tool file path: {file_paths['OSP Calc Tool']}")
+            log_step(f"OSP Calc Tool file path: {file_paths['OSP Calc Tool']}")
+        elif "HFM Managerial P&L" in filename:
+            file_paths["HFM Managerial P&L"] = os.path.join(folder_path, filename)
+            logging.info(f"HFM Managerial P&L file path: {file_paths['HFM Managerial P&L']}")
+            log_step(f"HFM Managerial P&L file path: {file_paths['HFM Managerial P&L']}")
+        elif "New KPI P&L" in filename:
+            file_paths["New KPI P&L"] = os.path.join(folder_path, filename)
+            logging.info(f"New KPI P&L file path: {file_paths['New KPI P&L']}")
+            log_step(f"New KPI P&L file path: {file_paths['New KPI P&L']}")
+        elif "HQ items" in filename:
+            file_paths["HQ items"] = os.path.join(folder_path, filename)
+            logging.info(f"HQ items file path: {file_paths['HQ items']}")
+            log_step(f"HQ items file path: {file_paths['HQ items']}")
+        elif "Goodwill" in filename:
+            file_paths["Goodwill"] = os.path.join(folder_path, filename)
+            logging.info(f"Goodwill file path: {file_paths['Goodwill']}")
+            log_step(f"Goodwill file path: {file_paths['Goodwill']}")
+        elif "OSP TGK 1C" in filename:
+            file_paths["OSP TGK"] = os.path.join(folder_path, filename)  
+            logging.info(f"OSP TGK 1C file path: {file_paths['OSP TGK']}")
+            log_step(f"OSP TGK 1C file path: {file_paths['OSP TGK']}")
+        elif "High_Level_Variance" in filename:
+            file_paths["High_Level_Variance"] = os.path.join(folder_path, filename)  
+            logging.info(f"High_Level_Variance file path: {file_paths['High_Level_Variance']}")
+            log_step(f"High_Level_Variance file path: {file_paths['High_Level_Variance']}")
+        elif "Reliefs KD" in filename:
+            file_paths["Relief_KD"] = os.path.join(folder_path, filename)  
+            logging.info(f"Relief_KD file path: {file_paths['Relief_KD']}")
+            log_step(f"Relief_KD file path: {file_paths['Relief_KD']}")
+        elif "Purchase Price" in filename:
+            file_paths["Purchase_Price"] = os.path.join(folder_path, filename)  
+            logging.info(f"Purchase_Price file path: {file_paths['Purchase_Price']}")
+            log_step(f"Purchase_Price file path: {file_paths['Purchase_Price']}")
+        elif "UP_Calc_Template_Simulation" in filename:
+            file_paths["UP_Calc_Template_Simulation"] = os.path.join(folder_path, filename)
+            logging.info(f"UP_Calc_Template_Simulation file path: {file_paths['UP_Calc_Template_Simulation']}")
+            log_step(f"UP_Calc_Template_Simulation file path: {file_paths['UP_Calc_Template_Simulation']}")
+        elif "NANO HFM" in filename:
+            file_paths["NANO_HFM"] = os.path.join(folder_path, filename)  
+            logging.info(f"NANO_HFM file path: {file_paths['NANO_HFM']}")
+            log_step(f"NANO_HFM file path: {file_paths['NANO_HFM']}")
+        elif "ITP" in filename:
+            file_paths["ITP"] = os.path.join(folder_path, filename)  
+            logging.info(f"ITP file path: {file_paths['ITP']}")
+            log_step(f"ITP file path: {file_paths['ITP']}")
+
+
+    copy_P_L_File=os.path.join(base_dir, 'Temp_files')
+    copied_path = copy_excel_file(file_paths["P&L Summary"], copy_P_L_File)
+    copy_master_sheet(file_paths["OSP Calc Tool"], copied_path,"jeanluc")
+
+
+
+
+    
+    try:
+        # Load all sheets from each Excel file at once
+        # pl_summary_sheets = read_xlsx_openpyxl(file_paths["P&L Summary"], password="jeanluc", return_all_sheets=True)
+        pl_summary_sheets = pd.read_excel(file_paths["P&L Summary"], sheet_name=None,engine="openpyxl")
+        hq_items_sheets = pd.read_excel(file_paths["HQ items"], sheet_name=None, engine="openpyxl")
+        osp_calc_sheets = pd.read_excel(file_paths["OSP Calc Tool"], sheet_name=None, engine="openpyxl")
+        hfm_mgr_sheets = pd.read_excel(file_paths["HFM Managerial P&L"], sheet_name=None, engine="openpyxl")
+        new_kpi_sheets = pd.read_excel(file_paths["New KPI P&L"], sheet_name=None, engine="openpyxl")
+        goodwill_sheets = pd.read_excel(file_paths["Goodwill"], sheet_name=None, engine="openpyxl")
+        osp_tgk_sheets = pd.read_excel(file_paths["OSP TGK"], sheet_name=None, engine="openpyxl")
+        high_level_variance_sheets = pd.read_excel(file_paths["High_Level_Variance"], sheet_name=None, engine="openpyxl")
+        relief_kd_sheets = pd.read_excel(file_paths["Relief_KD"], sheet_name=None, engine="openpyxl")
+        # print(relief_kd_sheets)
+        purchase_price_sheets = pd.read_excel(file_paths["Purchase_Price"], sheet_name=None, engine="openpyxl")
+        up_calc_template_simulation_sheets = pd.read_excel(file_paths['UP_Calc_Template_Simulation'], sheet_name=None, engine="openpyxl")
+        nano_hfm_sheets = pd.read_excel(file_paths['NANO_HFM'], sheet_name=None, engine="openpyxl")
+        itp_sheets = pd.read_excel(file_paths['ITP'], sheet_name=None, engine="openpyxl")
+
+    except FileNotFoundError as e:
+        missing_files = [key for key, value in file_paths.items() if value is None]
+        save_message_label.config(text=f"Error accessing files. Missing files: {missing_files}. Details: {str(e)}")
+        logging.error(f"File not found error for files: {missing_files}. Details: {str(e)}")
+        log_step(f"File not found error for files: {missing_files}. Details: {str(e)}", 'error')
+        progress_bar.stop()
+        toggle_buttons(True)
+        return
+
+    except PermissionError as e:
+        save_message_label.config(text=f"Error accessing files due to permission issues. Details: {str(e)}")
+        logging.error(f"Permission denied for files. Details: {str(e)}")
+        log_step(f"Permission denied for files. Details: {str(e)}", 'error')
+        progress_bar.stop()
+        toggle_buttons(True)
+        return
+
+    except ValueError as e:
+        global stop_thread
+        stop_thread = True
+        missing_files = [key for key, value in file_paths.items() if value is None]
+        missing_sheets_info = []
+
+        messagebox.showwarning(
+            "Missing Files/Sheets",
+            f"Missing files: {', '.join(missing_files)}\nMissing sheets info: {missing_sheets_info}\nDetails: {str(e)}"
+        )
+
+        save_message_label.config(
+            text=f"Error loading sheets from files. Missing files: {', '.join(missing_files)}. Missing sheets info: {missing_sheets_info}. Details: {str(e)}"
+        )
+
+        logging.error(
+            f"Sheet not found error. Missing files: {missing_files}. Missing sheets info: {missing_sheets_info}. Details: {str(e)}"
+        )
+
+        log_step(
+            f"Sheet not found error. Missing files: {', '.join(missing_files)}. Missing sheets info: {missing_sheets_info}. Details: {str(e)}",
+            'error'
+        )
+        progress_bar.stop()
+        toggle_buttons(True)
+        return
+
+    try:
+        df_p_l_rop_ne = pl_summary_sheets['ROP NE (Tagetik)']
+        df_p_l_hq = pl_summary_sheets['HQ Tagetik']
+        df_mz_conso = pl_summary_sheets['MZ conso TGK']
+        df_r_and_d = pl_summary_sheets['R&D']
+        df_p_l_new_kpi = pl_summary_sheets['New KPI Actual']
+        df_p_l_relief = pl_summary_sheets["Relief"]
+        df_p_l_pl = pl_summary_sheets['P&L Actual']
+        df_p_l_reclass = pl_summary_sheets['Reclass']
+        df_p_l_mccp = pl_summary_sheets['MCPP']
+        df_p_l_ocs = pl_summary_sheets['OCS details']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"P&L Summary missing sheet: {str(ke)}")
+
+    try:
+        df_hq_items = hq_items_sheets['Sheet1']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"HQ items missing sheet: {str(ke)}")
+
+    try:
+        df_osp = osp_calc_sheets['Master']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"OSP Calc Tool missing sheet: {str(ke)}")
+
+    try:
+        df_hmf_managerial = hfm_mgr_sheets['Managerial']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"HFM Managerial P&L missing sheet: {str(ke)}")
+
+    try:
+        df_new_kpi_cfmi = new_kpi_sheets ['CFMI']
+        df_act = new_kpi_sheets['Act']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"New KPI P&L missing sheet: {str(ke)}")
+
+    try:
+        df_new_goodwill = goodwill_sheets['GW Budget']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"Goodwill missing sheet: {str(ke)}")
+
+    try:
+        df_1c_osp=osp_tgk_sheets['Summary']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"OSP TGK missing sheet: {str(ke)}")
+
+    try:
+        df_high_variance_feuil=high_level_variance_sheets['Feuil1']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"High_Level_Variance missing sheet: {str(ke)}")
+
+    try:
+        df_relief_kd=relief_kd_sheets['vs 2+10']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"Relief_KD missing sheet: {str(ke)}")
+
+    try:
+        df_purchase_price=purchase_price_sheets['Summary pivot']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"Purchase_Price missing sheet: {str(ke)}")
+
+    try:
+        df_up_calc_template_simulation=up_calc_template_simulation_sheets['UP_Calculation']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"UP_Calc_Template_Simulation missing sheet: {str(ke)}")
+
+    try:
+        df_nano_hfm=nano_hfm_sheets['Actual']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"NANO_HFM missing sheet: {str(ke)}")
+
+    try:
+        df_itp=itp_sheets['BP25']
+        
+    except KeyError as ke:
+        missing_sheets_info.append(f"ITP missing sheet: {str(ke)}")
+    missing_files = [key for key, value in file_paths.items() if value is None]
+
+    if missing_files:
+        save_message_label.config(text=f"Error: Required files not found: {', '.join(missing_files)}.")
+        logging.info(f"Error: Sheet not found - {str(e)}")
+        log_step(f"Error: Sheet not found - {str(e)}")
+        progress_bar.stop()
+        toggle_buttons(True)
+        return
+
+    output_file_name = f"Template_FY{fiscal_year}_{selected_month}_output.xlsx"
+
+    # Show missing files and sheets in log and warning box
+    if missing_files or missing_sheets_info:
+        for file in missing_files:
+            log_text.insert(tk.END, f"Missing file: {file}\n", 'error')
+        for sheet in missing_sheets_info:
+            log_text.insert(tk.END, f"{sheet}\n", 'error')
+
+        messagebox.showwarning(
+            "Missing Files/Sheets",
+            f"Missing files:\n{', '.join(missing_files)}\n\nMissing sheets:\n{chr(10).join(missing_sheets_info)}"
+        )
+        
+        stop_thread = True
+        progress_bar.stop()
+        elapsed_time_label.config(text="Elapsed Time: 0.00 seconds")  # Reset elapsed time display
+        toggle_buttons(True)
+
+    if stop_thread:
+        save_message_label.config(text="Operation interrupted by user.")
+        progress_bar.stop()
+        toggle_buttons(True)
+        return
+
+    var_failure=False   
+   
+    file_path_template =copied_path
+    file_path_template_1 =file_paths["New KPI P&L"]
+
+
+      
+
+    try:
+        calculate_alternate_value_1(
+            file_paths["P&L Summary"],
+            df_p_l_rop_ne,
+            df_p_l_hq,
+            file_paths["OSP Calc Tool"],
+            df_osp,
+            file_paths["HFM Managerial P&L"],
+            df_hmf_managerial,
+            file_paths["New KPI P&L"],
+            df_p_l_new_kpi,
+            file_paths["HQ items"],
+            df_hq_items,
+            file_paths["Goodwill"],
+            df_r_and_d,
+            df_mz_conso,
+            df_p_l_relief,
+            df_p_l_pl,
+            df_p_l_reclass,
+            df_p_l_mccp,
+            df_p_l_ocs,
+            df_new_kpi_cfmi,
+            df_new_goodwill,
+            df_act,
+            file_paths["OSP TGK"],
+            df_1c_osp,
+            file_paths["High_Level_Variance"],
+            df_high_variance_feuil,
+            file_paths["Relief_KD"],
+            df_relief_kd,
+            file_paths["Purchase_Price"],
+            df_purchase_price,
+            file_paths["UP_Calc_Template_Simulation"],
+            df_up_calc_template_simulation,
+            file_paths['NANO_HFM'],
+            df_nano_hfm,
+            file_paths['ITP'],
+            df_itp,
+            file_path_template,#template P&L
+            file_path_template_1,#template new
+            selected_month,
+            var_converter,
+            var_cfmi,
+            var_ePWR,
+            var_connectivity,
+            var_cafe_penalty,
+            file_path_template_man_1,
+            file_path_template_man,
+            file_path_goodwill_template,
+            output_path,
+            var_converter_bJPY,
+            var_converter_mEUR
+        )
+    except Exception as e:
+        # Log and display error message
+        logging.info(f"Calculation not completed.")
+        log_step("Calculation not completed as the input format not matched with the template.Please re-run after correcting the error", 'error')
+        # logging.info("Calculation not completed successfully.")
+        logging.info(f"An error occurred: {str(e)}")
+        var_failure=True
+        progress_bar.stop()
+        save_message_label.config(
+            text=f"Error: {str(e)}",
+            fg="red"
+        )    
+
+
+    progress_bar.stop()
+    stop_thread = True
+
+    # end_time = time.time()  # End time calculation
+    # elapsed_time = end_time - start_time  # Calculate elapsed time
+    
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
+    # Convert to minutes and seconds
+    minutes = int(elapsed_time // 60)
+    seconds = int(elapsed_time % 60)
+
+    formatted_time = f"{minutes:02d}:{seconds:02d}"
+
+    if(var_failure==False):
+        # Log and display success message
+        logging.info(f"Calculation completed. Elapsed time: {elapsed_time:.2f} seconds")
+        log_step("Calculation completed successfully.", 'success')
+        logging.info("Calculation completed successfully.")
+        
+        save_message_label.config(
+            text=f"Template has been updated and saved. Time taken: {formatted_time} (mm:ss).",
+            fg="green"
+        )
+
+    toggle_buttons(True)
+    
+def update_elapsed_time():
+    start_time = time.time()
+    while not stop_thread:
+        elapsed_seconds = int(time.time() - start_time)
+        minutes, seconds = divmod(elapsed_seconds, 60)
+        elapsed_time_label.config(text=f"Elapsed Time: {minutes:02d}:{seconds:02d}")
+
+        time.sleep(0.5)  # Update every half second
+
+
+def load_converter_data():
+    try:
+        # Construct file path
+        file_path = os.path.join(os.getcwd(), 'Mandatory_folder', 'currency_converter.xlsx').replace("\\", "/")
+        reset_action_1()
+        
+        # Read the Excel file
+        df = pd.read_excel(file_path)
+        
+        # Get current year and month index
+        current_year = pd.Timestamp.now().year
+        month_index = month_dropdown.current() + 1
+        
+        # Check if data exists for the selected month and year
+        if not pd.isna(df.iloc[0, month_index]):
+            converter_var_entry.insert(0, df.iloc[0, month_index])
+            messagebox.showinfo("Data Info", f"Please check this data is coming from our database for {month_dropdown.get()} {df.iloc[0, 0]}.")
+        else:
+            messagebox.showinfo("Data Input", f"No data available for {month_dropdown.get()} {df.iloc[0, 0]}. Please enter a value in the entry field.")
+            
+            # Wait for user input in the entry field
+            root.wait_variable(converter_var_entry)
+
+            # Retrieve user input from entry field
+            user_input = converter_var_entry.get()
+            
+            
+            try:
+                # Convert input to float and update DataFrame
+                df.at[0, month_index] = float(user_input)
+                
+                # Save updated DataFrame back to Excel file
+                df.to_excel(file_path, index=False)
+                
+                messagebox.showinfo("Update Success", f"Data for {month_dropdown.get()} {df.iloc[0, 0]} has been updated successfully.")
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter a valid number.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to load converter data: {e}")
+
+
+def toggle_buttons(state):
+    submit_button_2.config(state=tk.NORMAL if state else tk.DISABLED)
+    reset_button.config(state=tk.NORMAL if not state else tk.DISABLED)
+
+def log_step(message, tag='step'):
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    log_text.insert(tk.END, f'[{timestamp}] {message}\n', tag)
+    log_text.see(tk.END)
+
+def reset_action():
+    global stop_thread
+    stop_thread = True
+    progress_bar.stop()
+    elapsed_time_label.config(text="Elapsed Time: 0.00 seconds")  # Reset elapsed time display
+    save_message_label.config(text="Operation interrupted by user.")
+    toggle_buttons(True)
+    converter_var_entry.delete(0,tk.END)
+    cafe_penalty_var.delete(0,tk.END)
+    connectivity_var.delete(0,tk.END)
+    converter_cfmi.delete(0,tk.END)
+    ePWR_var.delete(0,tk.END)
+    converter_bJPY.delete(0,tk.END)
+    converter_mEUR.delete(0,tk.END)
+
+def reset_action_1():
+    global stop_thread
+    stop_thread = True
+    converter_var_entry.delete(0,tk.END)
+    cafe_penalty_var.delete(0,tk.END)
+    connectivity_var.delete(0,tk.END)
+    converter_cfmi.delete(0,tk.END)
+    ePWR_var.delete(0,tk.END)
+    converter_bJPY.delete(0,tk.END)
+    converter_mEUR.delete(0,tk.END)
+
+
+# Initialize the main window
+root = tk.Tk()
+root.title("Europe Functional P&L")
+root.geometry("500x700")  # Adjusted size for compactness
+
+# Style configuration
+style = ttk.Style(root)
+
+# Header label
+header_label = tk.Label(root, text="Europe Functional P&L", font=("Arial", 16))
+header_label.pack(pady=10)
+
+# Frame for folder path input
+folder_frame = tk.Frame(root)
+folder_frame.pack(pady=5)
+
+tk.Label(folder_frame, text="Input Folder Path:").pack(side='top', padx=5, anchor='w')
+file_path_entry = tk.Entry(folder_frame, width=40)
+file_path_entry.pack(side='top', padx=5)
+browse_button = tk.Button(folder_frame, text="Browse", command=browse_folder)
+browse_button.pack(side='top', padx=5)
+
+# Output Folder Path section
+tk.Label(folder_frame, text="Output Folder Path:").pack(side='top', padx=5, anchor='w')
+output_path_entry = tk.Entry(folder_frame, width=40)
+output_path_entry.pack(side='top', padx=5)
+browse_button_1 = tk.Button(folder_frame, text="Browse", command=browse_folder_1)
+browse_button_1.pack(side='top', padx=5)
+
+
+# Frame for month selection dropdown
+month_frame = tk.Frame(root)
+month_frame.pack(pady=5)
+
+tk.Label(month_frame, text="Select Month:").pack(side='left', padx=5)
+month_var = tk.StringVar()
+month_dropdown = ttk.Combobox(month_frame, textvariable=month_var, width=20)
+month_dropdown['values'] = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+)
+month_dropdown.pack(side='left', padx=5)
+
+month_dropdown.bind("<<ComboboxSelected>>", lambda _: load_converter_data())
+
+# Frame for FX Converter input
+converter_frame = tk.Frame(root)
+converter_frame.pack(pady=5)
+
+tk.Label(converter_frame, text="FX Converter:").pack(side='left', padx=5)
+converter_var_entry = tk.Entry(converter_frame, width=20)
+converter_var_entry.pack(side='left', padx=5)
+
+# Frame for CFMI input
+cfmi_frame = tk.Frame(root)
+cfmi_frame.pack(pady=8)
+
+tk.Label(cfmi_frame, text="CFMI (Raw Data)").pack(side='left', padx=5)
+converter_cfmi = tk.Entry(cfmi_frame, width=20)
+converter_cfmi.pack(side='left', padx=8)
+
+ePWR_frame = tk.Frame(root)
+ePWR_frame.pack(pady=5)
+tk_label = tk.Label(ePWR_frame, text="ePWR Step2:").pack(side='left', padx=18)
+ePWR_var = tk.Entry(ePWR_frame, width=20)
+ePWR_var.pack(side='left', padx=5)
+
+
+connectivity_frame = tk.Frame(root)
+connectivity_frame.pack(pady=8)
+tk_label = tk.Label(connectivity_frame, text="Connectivity Calculation:")
+tk_label.pack(side='left', padx=2)
+connectivity_var = tk.Entry(connectivity_frame, width=20)
+connectivity_var.pack(side='left', padx=8)
+
+cafe_penalty_frame = tk.Frame(root)
+cafe_penalty_frame.pack(pady=8)
+tk_label = tk.Label(cafe_penalty_frame, text="Cafe Penalty:")
+tk_label.pack(side='left', padx=2)
+cafe_penalty_var = tk.Entry(cafe_penalty_frame, width=20)
+cafe_penalty_var.pack(side='left', padx=8)
+
+frame = tk.Frame(root)
+frame.pack(pady=10)
+
+# Create and pack the label and entry for bJPY G&A reclass
+tk.Label(frame, text="bJPY G&A reclass").pack(side='left', padx=5)
+converter_bJPY = tk.Entry(frame, width=15)  # Reduced width
+converter_bJPY.pack(side='left', padx=5)
+
+# Create and pack the label and entry for mEUR G&A reclass
+tk.Label(frame, text="mEUR G&A reclass").pack(side='left', padx=5)
+converter_mEUR = tk.Entry(frame, width=15)  # Reduced width
+converter_mEUR.pack(side='left', padx=5)
+
+# Submit button
+submit_button_2 = tk.Button(
+    root,
+    text="Generate P&L and NEW KPI Actuals Files",
+    command=submit_action_2,
+    bg='lightgreen'
+)
+submit_button_2.pack(pady=10)
+
+# Bottom frame for Reset and Quit buttons side by side
+bottom_frame = tk.Frame(root)
+bottom_frame.pack(pady=10)
+
+reset_button = tk.Button(bottom_frame, text="Reset", command=reset_action, bg='orange')
+reset_button.pack(side='left', padx=10)
+
+quit_button = tk.Button(bottom_frame, text="Quit", command=root.destroy, bg="red")
+quit_button.pack(side='left', padx=10)
+
+# Progress bar
+progress_bar = ttk.Progressbar(root, mode='indeterminate')
+progress_bar.pack(pady=10)
+
+# Elapsed time label
+elapsed_time_label = tk.Label(root, text="Elapsed Time: 0.00 seconds")
+elapsed_time_label.pack(pady=5)
+
+# Save message label
+save_message_label = tk.Label(root, text="")
+save_message_label.pack(pady=5)
+
+# Log text area
+log_text = tk.Text(root, height=8, width=60, wrap='word')
+log_text.tag_config('step', foreground='blue')
+log_text.tag_config('info', foreground='black')
+log_text.tag_config('success', foreground='green')
+log_text.tag_config('error', foreground='red')
+log_text.pack(pady=10)
+
+root.mainloop()
