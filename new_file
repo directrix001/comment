@@ -1,0 +1,2266 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import threading
+import time
+import logging
+import os
+import pandas as pd
+from Submit_2 import calculate_alternate_value_1
+from ACT import ACT
+from datetime import datetime
+from utils.logger import logger
+import openpyxl
+import msoffcrypto
+import shutil
+import io
+
+logger.info("UI triggered")
+
+base_dir = os.getcwd()
+_stop_event = threading.Event()   # thread-safe stop flag (replaces global bool)
+
+
+# ─────────────────────────── folder helpers ──────────────────────────────────
+
+def _browse(entry_widget, title="Select Folder"):
+    path = filedialog.askdirectory(title=title)
+    if path:
+        entry_widget.delete(0, tk.END)
+        entry_widget.insert(0, path)
+
+def browse_folder():
+    logging.info("Browse for input folder.")
+    log_step("Browse for input folder")
+    _browse(file_path_entry, "Select Input Folder")
+
+def browse_folder_1():
+    logging.info("Browse for output folder.")
+    log_step("Browse for output folder")
+    _browse(output_path_entry, "Select Output Folder")
+
+
+# ─────────────────────────── validation ──────────────────────────────────────
+
+def validate_inputs() -> bool:
+    """Return True only when all mandatory fields are non-empty."""
+    fields = {
+        "Input Folder":    file_path_entry.get().strip(),
+        "Output Folder":   output_path_entry.get().strip(),
+        "FX Converter":    converter_var_entry.get().strip(),
+        "Month":           month_dropdown.get(),
+        "CFMI":            converter_cfmi.get().strip(),
+        "Café Penalty":    cafe_penalty_var.get().strip(),
+        "Connectivity":    connectivity_var.get().strip(),
+        "ePWR Step2":      ePWR_var.get().strip(),
+        "mEUR G&A reclass": converter_mEUR.get().strip(),
+        "bJPY G&A reclass": converter_bJPY.get().strip(),
+    }
+    missing = [k for k, v in fields.items() if not v or v == ""]
+    if month_dropdown.current() == -1:
+        missing.insert(0, "Month")
+
+    if missing:
+        messagebox.showerror(
+            "Input Error",
+            "The following fields are mandatory:\n• " + "\n• ".join(missing)
+        )
+        return False
+
+    # Numeric validation for float fields
+    numeric_fields = {
+        "FX Converter":    converter_var_entry.get().strip(),
+        "CFMI":            converter_cfmi.get().strip(),
+        "Café Penalty":    cafe_penalty_var.get().strip(),
+        "Connectivity":    connectivity_var.get().strip(),
+        "ePWR Step2":      ePWR_var.get().strip(),
+        "mEUR G&A reclass": converter_mEUR.get().strip(),
+        "bJPY G&A reclass": converter_bJPY.get().strip(),
+    }
+    bad = []
+    for name, val in numeric_fields.items():
+        try:
+            float(val)
+        except ValueError:
+            bad.append(name)
+    if bad:
+        messagebox.showerror(
+            "Invalid Numbers",
+            "These fields must be numeric:\n• " + "\n• ".join(bad)
+        )
+        return False
+    return True
+
+
+# ─────────────────────────── fiscal year ─────────────────────────────────────
+
+def determine_fiscal_year(selected_month: int) -> int:
+    current_year = time.localtime().tm_year
+    return current_year - 1 if selected_month < 4 else current_year
+
+
+# ─────────────────────────── currency converter file ─────────────────────────
+
+def update_excel_converter():
+    """Write the FX rate entered by the user back into the converter workbook."""
+    try:
+        file_path = os.path.join(base_dir, 'Mandatory_folder', 'currency_converter.xlsx')
+        months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        month_index = month_dropdown.current()
+        user_input = converter_var_entry.get().strip()
+        df = pd.read_excel(file_path)
+        df.at[0, months[month_index]] = float(user_input)
+        df.to_excel(file_path, index=False)
+        log_step("Currency converter file updated successfully.", tag='step')
+    except ValueError:
+        messagebox.showerror("Invalid Input", "FX Converter must be a valid number.")
+    except PermissionError:
+        messagebox.showerror(
+            "Permission Error",
+            "Cannot write to the currency converter file.\n"
+            "Please close it and try again."
+        )
+    except Exception as e:
+        messagebox.showerror("Error", f"Unexpected error updating converter: {e}")
+
+
+# ─────────────────────────── copy helpers ────────────────────────────────────
+
+def copy_excel_file(source_path: str, dest_folder: str) -> str | None:
+    """Copy source_path into dest_folder, auto-incrementing the name on collision."""
+    try:
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError(f"Source file not found: {source_path}")
+        os.makedirs(dest_folder, exist_ok=True)
+        base_name, ext = os.path.splitext(os.path.basename(source_path))
+        dest = os.path.join(dest_folder, os.path.basename(source_path))
+        counter = 1
+        while os.path.exists(dest):
+            dest = os.path.join(dest_folder, f"{base_name}_{counter}{ext}")
+            counter += 1
+        shutil.copy2(source_path, dest)
+        logger.info(f"Copied {source_path} → {dest}")
+        return dest
+    except Exception as e:
+        logger.error(f"copy_excel_file error: {e}")
+        return None
+
+
+def copy_master_sheet(src_path: str, dest_path: str, password: str):
+    """
+    Read the 'Master' sheet from src_path and append it to dest_path.
+
+    KEY FIX: uses keep_vba=True and keep_links=True so that the workbook's
+    existing external references are NOT stripped by openpyxl on save.
+    """
+    try:
+        df = pd.read_excel(src_path, sheet_name='Master', engine='openpyxl')
+        # keep_links=True preserves the [Content_Types] relationships for
+        # cross-workbook formula references already in dest_path.
+        wb = openpyxl.load_workbook(dest_path, keep_links=True)
+
+        from openpyxl.workbook.protection import WorkbookProtection
+        wb.security = WorkbookProtection(workbookPassword=password, lockStructure=True)
+
+        # Remove old Master sheet if it was copied previously (re-run guard)
+        if 'Master' in wb.sheetnames:
+            del wb['Master']
+
+        ws = wb.create_sheet(title='Master')
+        # Write headers
+        for c_idx, col_name in enumerate(df.columns, start=1):
+            ws.cell(row=1, column=c_idx, value=col_name)
+        # Write data rows (row 1 = headers, data starts at row 2)
+        for r_idx, row in df.iterrows():
+            for c_idx, value in enumerate(row, start=1):
+                ws.cell(row=r_idx + 2, column=c_idx, value=value)
+        wb.save(dest_path)
+        logger.info("Master sheet copied successfully.")
+    except Exception as e:
+        logger.error(f"copy_master_sheet error: {e}")
+        log_step(f"Error copying Master sheet: {e}", 'error')
+        progress_bar.stop()
+        save_message_label.config(text=f"Error: {e}", fg="red")
+        raise
+
+
+# ─────────────────────────── encrypted-xlsx reader ───────────────────────────
+
+def read_xlsx_openpyxl(path: str, sheet_name=None, password: str | None = None,
+                       return_all_sheets: bool = False):
+    """
+    Read an xlsx/xlsm file, decrypting it first if it is password-protected.
+    Returns a DataFrame (or dict of DataFrames when return_all_sheets=True).
+    """
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Excel file not found: {path}")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in ('.xlsx', '.xlsm'):
+        raise ValueError(f"Unsupported format: {ext}")
+    if isinstance(sheet_name, str):
+        sheet_name = sheet_name.replace("&amp;", "&")
+
+    with open(path, "rb") as f:
+        office_file = msoffcrypto.OfficeFile(f)
+        encrypted = getattr(office_file, "is_encrypted", False)
+        if encrypted:
+            if not password:
+                raise ValueError("Workbook is encrypted – provide a password.")
+            buf = io.BytesIO()
+            office_file.load_key(password=password)
+            office_file.decrypt(buf)
+            buf.seek(0)
+            return pd.read_excel(buf, sheet_name=None if return_all_sheets else sheet_name,
+                                 engine='openpyxl')
+        return pd.read_excel(path, sheet_name=None if return_all_sheets else sheet_name,
+                             engine='openpyxl')
+
+
+# ─────────────────────────── main submit action ──────────────────────────────
+
+def submit_action_2():
+    selected_month = month_dropdown.get()
+    if not messagebox.askokcancel(
+        "Data Check",
+        f"Please ensure HFM {selected_month} data is fully populated before running."
+    ):
+        return
+
+    if not validate_inputs():
+        return
+
+    toggle_buttons(False)
+    _stop_event.clear()
+    progress_bar.pack()
+    save_message_label.pack()
+    progress_bar.start()
+
+    threading.Thread(target=update_elapsed_time, daemon=True).start()
+    threading.Thread(target=_run_update_converter_then_calc, daemon=True).start()
+
+    log_step("Started generating P&L and New KPI Actuals files…", tag='step')
+    save_message_label.config(text="Processing… Please wait.", fg="black")
+
+
+def _run_update_converter_then_calc():
+    """Run converter update synchronously, then kick off the main calculation."""
+    try:
+        update_excel_converter()
+    except Exception as e:
+        logger.warning(f"Converter update failed (non-fatal): {e}")
+    perform_calculation_2()
+
+
+# ─────────────────────────── heavy calculation thread ────────────────────────
+
+def perform_calculation_2():
+    missing_sheets_info: list[str] = []
+    logger.info("perform_calculation_2 started")
+    log_step("Reading input values. Started calculation…")
+    start_time = time.time()
+
+    # ── collect UI values ────────────────────────────────────────────────────
+    folder_path    = file_path_entry.get().strip()
+    output_path    = output_path_entry.get().strip()
+    selected_month = month_dropdown.current() + 1
+    fiscal_year    = determine_fiscal_year(selected_month)
+
+    var_ePWR          = float(ePWR_var.get())
+    var_cfmi          = -(float(converter_cfmi.get())) / 1e6
+    var_converter     = float(converter_var_entry.get())
+    var_connectivity  = -(float(connectivity_var.get())) / 1e6
+    var_cafe_penalty  = float(cafe_penalty_var.get())
+    var_converter_bJPY = converter_bJPY.get().strip()
+    var_converter_mEUR = converter_mEUR.get().strip()
+
+    log_step(f"CFMI: {var_cfmi:.6f}  |  FX Converter: {var_converter}")
+
+    # ── fiscal year label ────────────────────────────────────────────────────
+    now = datetime.now()
+    fy_start = now.year if now.month >= 4 else now.year - 1
+    financial_year = f"{fy_start}-{str(fy_start+1)[-2:]}"
+
+    # ── template paths ───────────────────────────────────────────────────────
+    mand = os.path.join(base_dir, 'Mandatory_folder')
+    if selected_month == 4:
+        file_path_template     = os.path.join(mand, 'FY25_P_L_Summary_March_template.xlsx')
+        file_path_template_1   = os.path.join(mand, 'New_KPI_P&L_FY25_Actual_New_OSP_template.xlsx')
+        file_path_template_man_1 = file_path_template_1
+        file_path_template_man   = file_path_template
+        file_path_goodwill_template = os.path.join(mand, 'Goodwill_template.xlsx')
+    else:
+        prev_month_name = month_dropdown['values'][month_dropdown.current() - 1]
+        file_path_template_man_1 = os.path.join(mand, 'New_KPI_P&L_FY25_Actual_New_OSP_template.xlsx')
+        file_path_template_man   = os.path.join(mand, 'FY25_P_L_Summary_March_template.xlsx')
+        file_path_goodwill_template = os.path.join(
+            base_dir, 'Goodwill_files',
+            f'Goodwill_{prev_month_name}_output_FY{financial_year}.xlsx'
+        )
+
+    # ── scan input folder for required files ─────────────────────────────────
+    file_keys = [
+        "P&L Summary", "OSP Calc Tool", "HFM Managerial P&L", "New KPI P&L",
+        "HQ items", "Goodwill", "OSP TGK", "High_Level_Variance",
+        "Relief_KD", "Purchase_Price", "UP_Calc_Template_Simulation",
+        "NANO_HFM", "ITP"
+    ]
+    keyword_map = {
+        "P&L Summary":                  "P&L Summary",
+        "OSP Calc Tool":                "OSP Calc Tool",
+        "HFM Managerial P&L":           "HFM Managerial P&L",
+        "New KPI P&L":                  "New KPI P&L",
+        "HQ items":                     "HQ items",
+        "Goodwill":                     "Goodwill",
+        "OSP TGK":                      "OSP TGK 1C",
+        "High_Level_Variance":          "High_Level_Variance",
+        "Relief_KD":                    "Reliefs KD",
+        "Purchase_Price":               "Purchase Price",
+        "UP_Calc_Template_Simulation":  "UP_Calc_Template_Simulation",
+        "NANO_HFM":                     "NANO HFM",
+        "ITP":                          "ITP",
+    }
+    file_paths: dict[str, str | None] = {k: None for k in file_keys}
+
+    try:
+        for fname in os.listdir(folder_path):
+            for key, kw in keyword_map.items():
+                if kw in fname and file_paths[key] is None:
+                    full = os.path.join(folder_path, fname)
+                    file_paths[key] = full
+                    log_step(f"{key}: {full}")
+                    logger.info(f"{key} → {full}")
+    except PermissionError as e:
+        _fatal(f"Cannot read input folder: {e}")
+        return
+
+    # ── copy P&L Summary and inject Master sheet ──────────────────────────────
+    temp_dir = os.path.join(base_dir, 'Temp_files')
+    copied_path = copy_excel_file(file_paths["P&L Summary"], temp_dir)
+    if not copied_path:
+        _fatal("Failed to copy P&L Summary to Temp_files.")
+        return
+    try:
+        copy_master_sheet(file_paths["OSP Calc Tool"], copied_path, "jeanluc")
+    except Exception:
+        return   # error already logged in copy_master_sheet
+
+    # ── load all DataFrames ───────────────────────────────────────────────────
+    try:
+        pl_summary_sheets     = pd.read_excel(file_paths["P&L Summary"],                    sheet_name=None, engine='openpyxl')
+        hq_items_sheets       = pd.read_excel(file_paths["HQ items"],                       sheet_name=None, engine='openpyxl')
+        osp_calc_sheets       = pd.read_excel(file_paths["OSP Calc Tool"],                  sheet_name=None, engine='openpyxl')
+        hfm_mgr_sheets        = pd.read_excel(file_paths["HFM Managerial P&L"],             sheet_name=None, engine='openpyxl')
+        new_kpi_sheets        = pd.read_excel(file_paths["New KPI P&L"],                    sheet_name=None, engine='openpyxl')
+        goodwill_sheets       = pd.read_excel(file_paths["Goodwill"],                       sheet_name=None, engine='openpyxl')
+        osp_tgk_sheets        = pd.read_excel(file_paths["OSP TGK"],                        sheet_name=None, engine='openpyxl')
+        high_level_var_sheets = pd.read_excel(file_paths["High_Level_Variance"],            sheet_name=None, engine='openpyxl')
+        relief_kd_sheets      = pd.read_excel(file_paths["Relief_KD"],                      sheet_name=None, engine='openpyxl')
+        purchase_price_sheets = pd.read_excel(file_paths["Purchase_Price"],                 sheet_name=None, engine='openpyxl')
+        up_calc_sheets        = pd.read_excel(file_paths['UP_Calc_Template_Simulation'],    sheet_name=None, engine='openpyxl')
+        nano_hfm_sheets       = pd.read_excel(file_paths['NANO_HFM'],                       sheet_name=None, engine='openpyxl')
+        itp_sheets            = pd.read_excel(file_paths['ITP'],                            sheet_name=None, engine='openpyxl')
+    except FileNotFoundError as e:
+        missing = [k for k, v in file_paths.items() if v is None]
+        log_step(f"Missing input files: {missing}. {e}", 'error')
+        _fatal(f"Missing files: {missing}\n{e}")
+        return
+    except PermissionError as e:
+        log_step(f"Permission error reading files: {e}", 'error')
+        _fatal(f"Permission error: {e}")
+        return
+    except ValueError as e:
+        log_step(f"Sheet not found: {e}", 'error')
+        _fatal(f"Sheet error: {e}")
+        return
+
+    # ── extract individual sheets with KeyError tracking ─────────────────────
+    def _sheet(df_dict, sheet, label):
+        try:
+            return df_dict[sheet]
+        except KeyError:
+            missing_sheets_info.append(f"{label}: sheet '{sheet}' not found")
+            return None
+
+    df_p_l_rop_ne   = _sheet(pl_summary_sheets,     'ROP NE (Tagetik)',   "P&L Summary")
+    df_p_l_hq       = _sheet(pl_summary_sheets,     'HQ Tagetik',         "P&L Summary")
+    df_mz_conso     = _sheet(pl_summary_sheets,     'MZ conso TGK',       "P&L Summary")
+    df_r_and_d      = _sheet(pl_summary_sheets,     'R&D',                "P&L Summary")
+    df_p_l_new_kpi  = _sheet(pl_summary_sheets,     'New KPI Actual',     "P&L Summary")
+    df_p_l_relief   = _sheet(pl_summary_sheets,     'Relief',             "P&L Summary")
+    df_p_l_pl       = _sheet(pl_summary_sheets,     'P&L Actual',         "P&L Summary")
+    df_p_l_reclass  = _sheet(pl_summary_sheets,     'Reclass',            "P&L Summary")
+    df_p_l_mccp     = _sheet(pl_summary_sheets,     'MCPP',               "P&L Summary")
+    df_p_l_ocs      = _sheet(pl_summary_sheets,     'OCS details',        "P&L Summary")
+    df_hq_items     = _sheet(hq_items_sheets,       'Sheet1',             "HQ items")
+    df_osp          = _sheet(osp_calc_sheets,       'Master',             "OSP Calc Tool")
+    df_hmf_mgr      = _sheet(hfm_mgr_sheets,        'Managerial',         "HFM Managerial P&L")
+    df_new_kpi_cfmi = _sheet(new_kpi_sheets,        'CFMI',               "New KPI P&L")
+    df_act          = _sheet(new_kpi_sheets,        'Act',                "New KPI P&L")
+    df_new_goodwill = _sheet(goodwill_sheets,       'GW Budget',          "Goodwill")
+    df_1c_osp       = _sheet(osp_tgk_sheets,        'Summary',            "OSP TGK")
+    df_hi_var       = _sheet(high_level_var_sheets, 'Feuil1',             "High_Level_Variance")
+    df_relief_kd    = _sheet(relief_kd_sheets,      'vs 2+10',            "Relief_KD")
+    df_purchase     = _sheet(purchase_price_sheets, 'Summary pivot',      "Purchase_Price")
+    df_up_calc      = _sheet(up_calc_sheets,        'UP_Calculation',     "UP_Calc_Template_Simulation")
+    df_nano_hfm     = _sheet(nano_hfm_sheets,       'Actual',             "NANO_HFM")
+    df_itp          = _sheet(itp_sheets,            'BP25',               "ITP")
+
+    # ── check for missing files / sheets ─────────────────────────────────────
+    missing_files = [k for k, v in file_paths.items() if v is None]
+
+    if missing_files or missing_sheets_info:
+        details = ""
+        if missing_files:
+            details += "Missing files:\n• " + "\n• ".join(missing_files) + "\n\n"
+        if missing_sheets_info:
+            details += "Missing sheets:\n• " + "\n• ".join(missing_sheets_info)
+        for msg in missing_files:
+            log_step(f"Missing file: {msg}", 'error')
+        for msg in missing_sheets_info:
+            log_step(msg, 'error')
+        messagebox.showwarning("Missing Files / Sheets", details.strip())
+        _stop_event.set()
+        progress_bar.stop()
+        elapsed_time_label.config(text="Elapsed Time: 00:00")
+        toggle_buttons(True)
+        return
+
+    if _stop_event.is_set():
+        save_message_label.config(text="Operation cancelled.", fg="orange")
+        progress_bar.stop()
+        toggle_buttons(True)
+        return
+
+    # ── assign template paths for this run ───────────────────────────────────
+    file_path_template   = copied_path
+    file_path_template_1 = file_paths["New KPI P&L"]
+
+    # ── call the calculation engine ───────────────────────────────────────────
+    var_failure = False
+    try:
+        calculate_alternate_value_1(
+            file_paths["P&L Summary"],
+            df_p_l_rop_ne, df_p_l_hq,
+            file_paths["OSP Calc Tool"], df_osp,
+            file_paths["HFM Managerial P&L"], df_hmf_mgr,
+            file_paths["New KPI P&L"], df_p_l_new_kpi,
+            file_paths["HQ items"], df_hq_items,
+            file_paths["Goodwill"],
+            df_r_and_d, df_mz_conso, df_p_l_relief, df_p_l_pl,
+            df_p_l_reclass, df_p_l_mccp, df_p_l_ocs,
+            df_new_kpi_cfmi, df_new_goodwill, df_act,
+            file_paths["OSP TGK"], df_1c_osp,
+            file_paths["High_Level_Variance"], df_hi_var,
+            file_paths["Relief_KD"], df_relief_kd,
+            file_paths["Purchase_Price"], df_purchase,
+            file_paths["UP_Calc_Template_Simulation"], df_up_calc,
+            file_paths['NANO_HFM'], df_nano_hfm,
+            file_paths['ITP'], df_itp,
+            file_path_template, file_path_template_1,
+            selected_month, var_converter, var_cfmi,
+            var_ePWR, var_connectivity, var_cafe_penalty,
+            file_path_template_man_1, file_path_template_man,
+            file_path_goodwill_template, output_path,
+            var_converter_bJPY, var_converter_mEUR,
+        )
+    except Exception as e:
+        logger.exception("Calculation error")
+        log_step(
+            "Calculation failed – please check inputs and re-run.", 'error'
+        )
+        var_failure = True
+        progress_bar.stop()
+        save_message_label.config(text=f"Error: {e}", fg="red")
+
+    # ── wrap-up ───────────────────────────────────────────────────────────────
+    progress_bar.stop()
+    _stop_event.set()
+
+    elapsed = time.time() - start_time
+    mins, secs = divmod(int(elapsed), 60)
+    fmt_time = f"{mins:02d}:{secs:02d}"
+
+    if not var_failure:
+        logger.info(f"Calculation completed in {elapsed:.1f}s")
+        log_step("Calculation completed successfully.", 'success')
+        save_message_label.config(
+            text=f"Done! Files saved to output folder. Time: {fmt_time} (mm:ss).",
+            fg="green"
+        )
+    toggle_buttons(True)
+
+
+def _fatal(msg: str):
+    """Show error in label and log, stop progress, re-enable buttons."""
+    log_step(msg, 'error')
+    save_message_label.config(text=msg, fg="red")
+    progress_bar.stop()
+    toggle_buttons(True)
+
+
+# ─────────────────────────── elapsed time ticker ─────────────────────────────
+
+def update_elapsed_time():
+    start = time.time()
+    while not _stop_event.is_set():
+        secs = int(time.time() - start)
+        m, s = divmod(secs, 60)
+        elapsed_time_label.config(text=f"Elapsed Time: {m:02d}:{s:02d}")
+        time.sleep(0.5)
+
+
+# ─────────────────────────── load converter data on month select ──────────────
+
+def load_converter_data(_event=None):
+    try:
+        file_path = os.path.join(base_dir, 'Mandatory_folder', 'currency_converter.xlsx')
+        _clear_numeric_entries()
+        df = pd.read_excel(file_path)
+        month_index = month_dropdown.current() + 1
+        val = df.iloc[0, month_index]
+        if pd.notna(val):
+            converter_var_entry.insert(0, val)
+            messagebox.showinfo(
+                "Converter Data",
+                f"Pre-loaded FX rate for {month_dropdown.get()} "
+                f"({df.iloc[0, 0]}). Please verify."
+            )
+        else:
+            messagebox.showinfo(
+                "Converter Data",
+                f"No FX rate stored for {month_dropdown.get()}. "
+                "Please enter a value manually."
+            )
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to load converter data: {e}")
+
+
+# ─────────────────────────── UI helpers ──────────────────────────────────────
+
+def _clear_numeric_entries():
+    for w in (converter_var_entry, cafe_penalty_var, connectivity_var,
+              converter_cfmi, ePWR_var, converter_bJPY, converter_mEUR):
+        w.delete(0, tk.END)
+
+
+def toggle_buttons(enabled: bool):
+    submit_button_2.config(state=tk.NORMAL if enabled else tk.DISABLED)
+    reset_button.config(state=tk.DISABLED if enabled else tk.NORMAL)
+
+
+def log_step(message: str, tag: str = 'step'):
+    ts = datetime.now().strftime('%H:%M:%S')
+    log_text.insert(tk.END, f'[{ts}] {message}\n', tag)
+    log_text.see(tk.END)
+
+
+def reset_action():
+    _stop_event.set()
+    progress_bar.stop()
+    elapsed_time_label.config(text="Elapsed Time: 00:00")
+    save_message_label.config(text="Operation cancelled.", fg="orange")
+    toggle_buttons(True)
+    _clear_numeric_entries()
+
+
+# ═════════════════════════════ BUILD THE UI ═══════════════════════════════════
+
+root = tk.Tk()
+root.title("Europe Functional P&L")
+root.geometry("520x780")
+root.resizable(False, False)
+
+# ── header ────────────────────────────────────────────────────────────────────
+tk.Label(root, text="Europe Functional P&L", font=("Arial", 16, "bold")).pack(pady=(14, 4))
+tk.Label(root, text="Actuals Generation Tool", font=("Arial", 10), fg="gray").pack(pady=(0, 10))
+ttk.Separator(root, orient='horizontal').pack(fill='x', padx=20, pady=(0, 8))
+
+# ── folder paths ─────────────────────────────────────────────────────────────
+folder_frame = tk.LabelFrame(root, text=" Paths ", padx=10, pady=8)
+folder_frame.pack(fill='x', padx=20, pady=4)
+
+tk.Label(folder_frame, text="Input Folder:").grid(row=0, column=0, sticky='w')
+file_path_entry = tk.Entry(folder_frame, width=36)
+file_path_entry.grid(row=1, column=0, sticky='ew', pady=(2, 6))
+tk.Button(folder_frame, text="Browse…", command=browse_folder, width=9).grid(row=1, column=1, padx=(6, 0))
+
+tk.Label(folder_frame, text="Output Folder:").grid(row=2, column=0, sticky='w')
+output_path_entry = tk.Entry(folder_frame, width=36)
+output_path_entry.grid(row=3, column=0, sticky='ew', pady=(2, 0))
+tk.Button(folder_frame, text="Browse…", command=browse_folder_1, width=9).grid(row=3, column=1, padx=(6, 0))
+folder_frame.columnconfigure(0, weight=1)
+
+# ── month selection ───────────────────────────────────────────────────────────
+month_frame = tk.LabelFrame(root, text=" Period ", padx=10, pady=8)
+month_frame.pack(fill='x', padx=20, pady=4)
+tk.Label(month_frame, text="Select Month:").pack(side='left')
+month_var = tk.StringVar()
+month_dropdown = ttk.Combobox(month_frame, textvariable=month_var, width=22, state='readonly')
+month_dropdown['values'] = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+)
+month_dropdown.pack(side='left', padx=(8, 0))
+month_dropdown.bind("<<ComboboxSelected>>", load_converter_data)
+
+# ── numeric inputs ────────────────────────────────────────────────────────────
+inputs_frame = tk.LabelFrame(root, text=" Parameters ", padx=10, pady=8)
+inputs_frame.pack(fill='x', padx=20, pady=4)
+
+LABEL_W = 24
+
+def _row(parent, label_text, row):
+    tk.Label(parent, text=label_text, width=LABEL_W, anchor='w').grid(
+        row=row, column=0, sticky='w', pady=2)
+    e = tk.Entry(parent, width=18)
+    e.grid(row=row, column=1, sticky='ew', pady=2)
+    return e
+
+converter_var_entry = _row(inputs_frame, "FX Converter (USD/JPY):", 0)
+converter_cfmi      = _row(inputs_frame, "CFMI (Raw Data):",         1)
+ePWR_var            = _row(inputs_frame, "ePWR Step2:",               2)
+connectivity_var    = _row(inputs_frame, "Connectivity Calculation:", 3)
+cafe_penalty_var    = _row(inputs_frame, "Café Penalty:",             4)
+converter_bJPY      = _row(inputs_frame, "bJPY G&A Reclass:",        5)
+converter_mEUR      = _row(inputs_frame, "mEUR G&A Reclass:",        6)
+inputs_frame.columnconfigure(1, weight=1)
+
+# ── action buttons ────────────────────────────────────────────────────────────
+btn_frame = tk.Frame(root)
+btn_frame.pack(pady=10)
+
+submit_button_2 = tk.Button(
+    btn_frame,
+    text="Generate P&L and New KPI Actuals",
+    command=submit_action_2,
+    bg='#4CAF50', fg='white',
+    font=("Arial", 10, "bold"),
+    padx=10, pady=4,
+    relief=tk.FLAT, cursor='hand2'
+)
+submit_button_2.pack(side='left', padx=6)
+
+reset_button = tk.Button(
+    btn_frame, text="Reset", command=reset_action,
+    bg='#FF9800', fg='white', font=("Arial", 10),
+    padx=10, pady=4, relief=tk.FLAT, cursor='hand2'
+)
+reset_button.pack(side='left', padx=6)
+
+tk.Button(
+    btn_frame, text="Quit", command=root.destroy,
+    bg='#f44336', fg='white', font=("Arial", 10),
+    padx=10, pady=4, relief=tk.FLAT, cursor='hand2'
+).pack(side='left', padx=6)
+
+# ── progress & status ─────────────────────────────────────────────────────────
+progress_bar = ttk.Progressbar(root, mode='indeterminate', length=460)
+progress_bar.pack(pady=(4, 2))
+
+elapsed_time_label = tk.Label(root, text="Elapsed Time: 00:00", font=("Arial", 9))
+elapsed_time_label.pack()
+
+save_message_label = tk.Label(root, text="", font=("Arial", 9), wraplength=460)
+save_message_label.pack(pady=(2, 4))
+
+# ── log area ──────────────────────────────────────────────────────────────────
+log_frame = tk.LabelFrame(root, text=" Log ", padx=4, pady=4)
+log_frame.pack(fill='both', expand=True, padx=20, pady=(0, 12))
+
+log_text = tk.Text(log_frame, height=10, width=60, wrap='word',
+                   font=("Consolas", 9))
+log_scroll = ttk.Scrollbar(log_frame, command=log_text.yview)
+log_text.configure(yscrollcommand=log_scroll.set)
+log_text.pack(side='left', fill='both', expand=True)
+log_scroll.pack(side='right', fill='y')
+
+log_text.tag_config('step',    foreground='#1565C0')
+log_text.tag_config('info',    foreground='#424242')
+log_text.tag_config('success', foreground='#2E7D32')
+log_text.tag_config('error',   foreground='#C62828')
+
+root.mainloop()
+"""
+Submit_2.py
+===========
+Core calculation engine.  Called by UI_2.py → perform_calculation_2().
+
+Design notes
+------------
+*  All "find column for this month" calls are centralised to the two helpers
+   find_columns_with_month_short / find_columns_with_month_long from the
+   helper module.  No inline column-index arithmetic elsewhere.
+
+*  Formula strings that reference external workbooks are built by
+   generate_excel_formula() which always uses forward-slash paths.  This is
+   the root cause of the "broken links" bug in the original code:
+   openpyxl's load_workbook() + save() without keep_links=True strips the
+   external relationship entries from the zip package.  The fix is applied
+   inside paste_values_KPI_PL (keep_links=True).
+
+*  All helper imports are explicit so the linter can resolve them.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Optional
+
+import pandas as pd
+
+from Submit_2_Helper_function import (
+    # row searchers
+    find_row_numbers,
+    search_turnover_in_dataframe,
+    find_fmi_row_nv,
+    find_fmi_row_uc,
+    find_fmi_row_as,
+    find_fmi_row_export,
+    search_omp_terms,
+    search_manufacturing_terms,
+    MZ_Sheet_terms,
+    find_financial_indices,
+    find_oem_terms,
+    find_ocs_terms,
+    search_rd_terms,
+    find_R_and_D_File,
+    find_transfer_price_adjustment,
+    tax_and_public,
+    operating_profit,
+    relief_search_terms_new,
+    G_and_A_Reliev1,
+    export_ITP_Export,
+    energy_tgk_68,
+    # column/month finders
+    find_columns_with_month_short,
+    find_columns_with_month_long,
+    find_month_columns_Relief_KD,
+    find_month_columns_export,
+    find_indices_feuil,
+    find_op_and_month,
+    find_outside_profit_and_month_value,
+    find_second_column_for_outside_profit,
+    # formula builders
+    generate_excel_formula,
+    generate_excel_formula_249,
+    extract_formula,
+    extract_value_formula_latest,
+    manage_sheet_visibility,
+    # writer
+    paste_values_KPI_PL,
+)
+from ACT import ACT
+from utils.logger import logger
+
+logger.info("Submit_2 triggered")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Public entry-point
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calculate_alternate_value_1(
+    # ── file paths ──────────────────────────────────────────────────────────
+    file_path_P_L: str,
+    # ── DataFrames ──────────────────────────────────────────────────────────
+    df_P_L_ROP_NE:  pd.DataFrame,
+    df_P_L_HQ:      pd.DataFrame,
+    file_path_OSP:  str,
+    df_OSP:         pd.DataFrame,
+    file_path_HMF:  str,
+    df_HMF_Managerial: pd.DataFrame,
+    file_path_New_KPI: str,
+    df_P_L_New_KPI: pd.DataFrame,
+    file_HQ_Item:   str,
+    df_hQ_items:    pd.DataFrame,
+    file_goodwill:  str,
+    df_r_and_d:     pd.DataFrame,
+    df_MZ_conso:    pd.DataFrame,
+    df_P_L_Relief:  pd.DataFrame,
+    df_P_L_PL:      pd.DataFrame,
+    df_P_L_Reclass: pd.DataFrame,
+    df_P_L_MCCP:    pd.DataFrame,
+    df_P_L_OCS:     pd.DataFrame,
+    df_New_KPI_CFMI:  pd.DataFrame,
+    df_New_goodwill:  pd.DataFrame,
+    df_Act:           pd.DataFrame,
+    file_paths_OSP_TGK:    str,
+    df_1c_osp:             pd.DataFrame,
+    file_paths_High_Level_Variance: str,
+    df_high_variance_feuil:         pd.DataFrame,
+    file_paths_Relief_KD:  str,
+    df_Relief_KD:          pd.DataFrame,
+    file_paths_Purchase_Price: str,
+    df_Purchase_Price:         pd.DataFrame,
+    file_paths_UP_Calc:    str,
+    df_UP_Calc:            pd.DataFrame,
+    file_paths_NANO_HFM:   str,
+    df_nano_hfm:           pd.DataFrame,
+    file_paths_ITP:        str,
+    df_itp:                pd.DataFrame,
+    # ── template / output ───────────────────────────────────────────────────
+    file_path_Template:      str,
+    file_path_Template_1:    str,
+    month_number:            int,
+    Var_Converter:           float,
+    var_Cfmi:                float,
+    ePWR_var:                float,
+    connectivity_var:        float,
+    cafe_penalty_var:        float,
+    file_path_Template_man_1: str,
+    file_path_Template_man:   str,
+    file_path_goodwill_template: str,
+    output_path:             str,
+    var_converter_bJPY:      str,
+    var_converter_mEUR:      str,
+) -> None:
+    """
+    Build all cell-update tuples from the source DataFrames and write them
+    into the copied template workbook via paste_values_KPI_PL.
+    Then hand off to ACT for the second output file.
+    """
+
+    t0 = time.time()
+    logger.info("calculate_alternate_value_1 started")
+
+    # ── month offset (April = 0) ─────────────────────────────────────────────
+    adj = (month_number - 4) % 12      # 0 for April, 1 for May, …
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  1.  COLUMN INDICES
+    # ══════════════════════════════════════════════════════════════════════════
+
+    col_ROP_NE   = find_columns_with_month_short(df_P_L_ROP_NE,  month_number)
+    col_PL_PL    = find_columns_with_month_short(df_P_L_PL,      month_number)
+    col_New_KPI  = find_columns_with_month_short(df_P_L_New_KPI, month_number)
+    col_MZ_conso = find_columns_with_month_short(df_MZ_conso,    month_number)
+    col_Reclass  = find_columns_with_month_short(df_P_L_Reclass, month_number)
+    col_Relief   = 4 + adj
+
+    col_r_and_d  = find_columns_with_month_long(df_r_and_d,   month_number)
+    col_hq       = find_columns_with_month_long(df_hQ_items,  month_number)
+    col_hq_tgt   = find_columns_with_month_long(df_P_L_HQ,    month_number)
+    col_mccp     = find_columns_with_month_long(df_P_L_MCCP,  month_number)
+    col_ocp      = find_columns_with_month_long(df_P_L_OCS,   month_number)
+
+    # ── OSP TGK column (1-based offset from April) ───────────────────────────
+    col_osp_tgk  = 1 + adj
+
+    # ── column used in the P&L Actual sheet writes ───────────────────────────
+    col_PL_write = col_PL_PL + 1      # the original code adds 1 here
+
+    # ── New KPI column (1-indexed offset matches original: P_L_New_KPI_index+1) ─
+    col_KPI_write = col_New_KPI + 1
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  2.  ROW INDICES – P&L Summary (ROP NE sheet)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    row_map = find_row_numbers(df_P_L_ROP_NE)
+
+    def _r(key: str) -> int:
+        vals = row_map.get(key, [])
+        return vals[0] if vals else 0
+
+    row_nissan_retail   = _r("nissanretailvolume")
+    row_infiniti_retail = _r("infinitiretailvolume")
+    row_datsun_retail   = _r("datsunretailvolume")
+    row_tiv             = _r("tiv")
+    row_ms_nissan       = _r("marketshare-nissan")
+    row_ms_infiniti     = _r("marketshare-infiniti")
+    row_ms_datsun       = _r("marketshare-datsun")
+    row_opening_stock   = _r("openingstock")
+    row_nmuk            = _r("nmuk")
+    row_nmisa           = _r("nmisa")
+    row_nmgr            = _r("nmgr")
+    row_purchase_vol    = _r("purchasevolume")
+    row_total_in        = _r("totalin")
+    row_ew_nissan       = _r("europeanwholesalevolume-nissan")
+    row_ew_infiniti     = _r("europeanwholesalevolume-infiniti")
+    row_ew_datsun       = _r("europeanwholesalevolume-datsun")
+    row_exp_nissan      = _r("exportvolumenissan")
+    row_exp_infiniti    = _r("exportvolume-infiniti")
+    row_renault_trucks  = _r("renaulttrucks")
+    row_daimler         = _r("daimler")
+    row_renault         = _r("renault")
+    row_gtr_idg         = _r("gtr[idg]")
+    row_captives        = _r("captives")
+    row_scope_adj       = _r("scopeadjustment")
+    row_closing_stock   = _r("closingstock")
+
+    # ── Turnover section row indices ─────────────────────────────────────────
+    t2 = search_turnover_in_dataframe(df_P_L_ROP_NE)
+    def _t(k): return (t2.get(k) or [0])[0]
+
+    row_nissan_nv     = _t("nissan nv")
+    row_nissan_bb     = _t("nissan bb")
+    row_infiniti_nv   = _t("infiniti nv")
+    row_infiniti_bb   = _t("infiniti bb")
+    row_datsun_nv     = _t("datsun nv")
+    row_datsun_bb     = _t("datsun bb")
+    row_nissan_uc     = _t("nissan used cars")
+    row_infiniti_uc   = _t("infiniti used cars")
+    row_nissan_as     = _t("nissan after sales")
+    row_infiniti_as   = _t("infiniti after sales")
+    row_datsun_as     = _t("datsun after sales")
+    row_exp_nis_t     = _t("export nissan")
+    row_exp_inf_t     = _t("export infiniti")
+
+    # ── FMI block row indices ─────────────────────────────────────────────────
+    (fmi_nis_nv, trn_nis_nv, cos_nis_nv, vme_nis_nv,
+     fmi_dat_nv, trn_dat_nv, cos_dat_nv, vme_dat_nv,
+     fmi_inf_nv, trn_inf_nv, cos_inf_nv, vme_inf_nv,
+     fmi_tot_nv, trn_tot_nv, cos_tot_nv, vme_tot_nv,
+     ) = find_fmi_row_nv(df_P_L_ROP_NE)
+
+    (fmi_nis_uc, trn_nis_uc, cos_nis_uc, vme_nis_uc,
+     fmi_dat_uc, trn_dat_uc, cos_dat_uc, vme_dat_uc,
+     fmi_tot_uc, trn_tot_uc, cos_tot_uc, vme_tot_uc,
+     ) = find_fmi_row_uc(df_P_L_ROP_NE)
+
+    (fmi_nis_as, trn_nis_as, cos_nis_as, vme_nis_as,
+     fmi_dat_as, trn_dat_as, cos_dat_as, vme_dat_as,
+     fmi_inf_as, trn_inf_as, cos_inf_as, vme_inf_as,
+     fmi_tot_as, trn_tot_as, cos_tot_as, vme_tot_as,
+     ) = find_fmi_row_as(df_P_L_ROP_NE)
+
+    (fmi_nis_ex, trn_nis_ex, cos_nis_ex, vme_nis_ex,
+     fmi_dat_ex, trn_dat_ex, cos_dat_ex, vme_dat_ex,
+     fmi_inf_ex, trn_inf_ex, cos_inf_ex, vme_inf_ex,
+     fmi_tot_ex, trn_tot_ex, cos_tot_ex, vme_tot_ex,
+     ) = find_fmi_row_export(df_P_L_ROP_NE)
+
+    # ── OMP section ───────────────────────────────────────────────────────────
+    omp = search_omp_terms(df_P_L_ROP_NE)
+    def _omp(k): return (omp.get(k) or [0])[0]
+    row_x83_rop        = _omp("x83 sales to renault")
+    row_f91r_rop       = _omp("f91r sales to renault trucks")
+    row_pp_inter_rop   = _omp("production parts sales to inter-companies")
+    row_cant_rop       = _omp("cantabria sales to third party")
+    row_parts_ren_rop  = _omp("parts sales to renault")
+    row_bat_oth_rop    = _omp("battery plant other costs")
+    row_scraps_rop     = _omp("scraps sales")
+    row_pensions_rop   = _omp("pensions")
+    row_others_rop     = _omp("others")
+
+    # ── Manufacturing section ─────────────────────────────────────────────────
+    mfg = search_manufacturing_terms(df_P_L_ROP_NE)
+    def _mfg(k): return (mfg.get(k) or [0])[0]
+    row_materials      = _mfg("materials costs")
+    row_bo_reduct      = _mfg("b/o cost reduction")
+    row_renault_tp     = _mfg("renault tp")
+    row_ic_kd          = _mfg("intercompany parts / kd")
+    row_inbound_fr     = _mfg("inbound freight / insurance")
+    row_inbound_duty   = _mfg("inbound duty")
+    row_inhouse_dl     = _mfg("inhouse / direct labour")
+    row_bat_nmuk       = _mfg("battery (nmuk)")
+    row_events         = _mfg("events")
+    row_oth_adj_mfg    = _mfg("other adjustments")
+    row_others_mfg     = _mfg("others")
+    row_core_fixed     = _mfg("core fixed")
+    row_pic_nissan     = _mfg("pic (nissan)")
+    row_regional_cost  = _mfg("regional cost")
+    row_vend_tool      = _mfg("vendor tooling depreciation")
+    row_projects       = _mfg("projects")
+    row_nesas          = _mfg("nesas/nisa manufacturing")
+    row_bat_fixed      = _mfg("battery fixed")
+    row_inf_fixed_gd1a = _mfg("infiniti fixed cost (gd1a)")
+    row_maint_dd       = _mfg("maintenance of existing models (d&d)")
+    row_gd1a_shift     = _mfg("gd1a top position shift to icp")
+    row_supp_claims    = _mfg("supplier claims & other")
+
+    # ── G&A financial indices ─────────────────────────────────────────────────
+    (idx_labour, idx_is, idx_dep, idx_prov, idx_overhead) = \
+        find_financial_indices(df_P_L_ROP_NE)
+
+    # ── OEM section ───────────────────────────────────────────────────────────
+    (oem_trn, oem_std, oem_mgn, oem_veh,
+     oem_log, oem_roy, oem_oth, oem_eop) = find_oem_terms(df_P_L_ROP_NE)
+
+    # ── OCS section ───────────────────────────────────────────────────────────
+    ocs_row = find_ocs_terms(df_P_L_ROP_NE)
+
+    # ── R&D rows (ROP NE sheet) ───────────────────────────────────────────────
+    rd_rows = search_rd_terms(df_P_L_ROP_NE)
+    row_func_rd     = (rd_rows.get("functional r&d")     or [0])[0]
+    row_nonfunc_rd  = (rd_rows.get("non functional r&d") or [0])[0]
+
+    # ── R&D File rows ─────────────────────────────────────────────────────────
+    rd_file = find_R_and_D_File(df_r_and_d)
+    def _rdf(k): return (rd_file.get(k) or [0])[0]
+    row_func_rd_rev    = _rdf("functional r&d revenue")
+    row_func_rd_cost   = _rdf("functional r&d cost")
+    row_nf_rd_rev      = _rdf("non functional r&d revenue")
+    row_nf_rd_cost     = _rdf("non functional r&d cost")
+
+    # ── MZ conso rows ─────────────────────────────────────────────────────────
+    mz = MZ_Sheet_terms(df_MZ_conso)
+    def _mz(k): return (mz.get(k) or [0])[0]
+    row_mz_x83       = _mz("x83 sales to renault")
+    row_mz_trucks    = _mz("sales to renault trucks")
+    row_mz_pp_inter  = _mz("production parts sales to inter-companies")
+    row_mz_cant      = _mz("cantabria sales to third party")
+    row_mz_h4bu      = _mz("parts sales to renault (h4bu camshaft)")
+    row_mz_scrap     = _mz("scrap sales")
+    row_mz_bat       = _mz("battery plant to")
+    row_mz_others    = _mz("others")
+
+    # ── HQ items ─────────────────────────────────────────────────────────────
+    tp_row  = find_transfer_price_adjustment(df_hQ_items)
+    tp_base = tp_row[0] if tp_row else 0
+
+    tax_row = tax_and_public(df_P_L_HQ)
+    op_row  = operating_profit(df_P_L_HQ)
+    tax_base = tax_row[0] if tax_row else 0
+    op_base  = op_row[0]  if op_row  else 0
+
+    # ── Reclass row ───────────────────────────────────────────────────────────
+    reclass_row = G_and_A_Reliev1(df_P_L_Reclass)
+    if reclass_row is None:
+        reclass_row = 0
+
+    # ── Relief rows ───────────────────────────────────────────────────────────
+    rel = relief_search_terms_new(df_P_L_Relief)
+    def _rel(k): return rel.get(k, 0)
+
+    row_rel_recall       = _rel("recall service/campaigns")
+    row_rel_kd_nmuk      = _rel("kd itp (nmuk)")
+    row_rel_kd_nmisa     = _rel("kd itp (nmisa)")
+    row_rel_kd_nmgr      = _rel("kd itp (nmgr)")
+    row_rel_conn         = _rel("connectivity")
+    row_rel_itp_nis      = _rel("itp cbu nissan")
+    row_rel_itp_inf      = _rel("itp cbu infiniti")
+    row_rel_iln_nmuk     = _rel("iln export (nmuk)")
+    row_rel_iln_nmisa    = _rel("iln export (nmisa)")
+    row_rel_err_mz       = _rel("error correction in mz (?)")
+    row_rel_mz_imp       = _rel("mz impairment")
+    row_rel_ga_imp       = _rel("g&a impairment")
+    row_rel_cev          = _rel("compact ev/vt impairment")
+    row_rel_bat_nmuk     = _rel("battery 40 kw itp ( nmuk )")
+    row_rel_bat_nmisa    = _rel("battery 40 kw itp ( nmisa )")
+    row_rel_bat_cancel   = _rel("battery cancelation")
+    row_rel_err_wd5      = _rel("error correction in mz (after wd5)")
+    row_rel_top_daim     = _rel("top daimler correction (after wd5)")
+    row_rel_inf_fmi      = _rel("infiniti fmi correction (after wd5)")
+
+    # ── OSP outside profit ───────────────────────────────────────────────────
+    row_osp1, col_osp1 = find_outside_profit_and_month_value(df_OSP, month_number)
+    row_osp2, col_osp2 = find_second_column_for_outside_profit(df_OSP, month_number)
+
+    # ── Feuil1 (High Level Variance) ─────────────────────────────────────────
+    row_feuil, col_feuil_base = find_indices_feuil(df_high_variance_feuil, month_number)
+    col_feuil = col_feuil_base + 1 + adj
+
+    # ── Relief KD column indices ──────────────────────────────────────────────
+    kd_cols = find_month_columns_Relief_KD(df_Relief_KD, month_number)
+
+    # ── ITP export rows / columns ─────────────────────────────────────────────
+    itp_rows = export_ITP_Export(df_itp)
+    itp_cols = find_month_columns_export(df_itp, month_number)
+
+    # ── NANO HFM ─────────────────────────────────────────────────────────────
+    row_nano, col_nano = find_op_and_month(df_nano_hfm, month_number)
+
+    # ── Energy TGK row ───────────────────────────────────────────────────────
+    energy_row_list = energy_tgk_68(df_hQ_items)
+    energy_row = energy_row_list[0] if energy_row_list else 0
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  3.  BUILD FORMULA STRINGS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    SH = "ROP NE (Tagetik)"
+
+    def f(row, col, sheet=SH, fn=None):
+        return generate_excel_formula(row, col, sheet, fn)
+
+    # ── HQ items formulas (cross-workbook) ───────────────────────────────────
+    fhq  = lambda offset: f(tp_base + offset, col_hq, "Sheet1", file_HQ_Item)
+
+    formula_hq_1  = fhq(5)
+    formula_hq_2  = fhq(3)
+    formula_hq_3  = fhq(6)
+    formula_hq_4  = fhq(10)
+    formula_hq_5  = fhq(18)
+    formula_hq_6  = fhq(21)
+    formula_hq_7  = fhq(22)
+    formula_hq_8  = fhq(26)
+    formula_hq_9  = fhq(4)
+    formula_hq_10 = fhq(34)
+    formula_hq_11 = fhq(1)
+    formula_hq_12 = fhq(20)
+
+    parts = " + ".join(x[1:] for x in [
+        formula_hq_1, formula_hq_2, formula_hq_3, formula_hq_4,
+        formula_hq_5, formula_hq_6, formula_hq_7, formula_hq_8,
+        formula_hq_9, formula_hq_10, formula_hq_11, formula_hq_12,
+    ])
+    formula_hq_sum = f"=({parts}) / 1000000"
+
+    # ── HQ Tagetik tax & operating profit formulas ───────────────────────────
+    ftax = lambda offset: f(tax_base + offset, col_hq_tgt, "HQ Tagetik")
+    fop  = lambda offset: f(op_base  + offset, col_hq_tgt, "HQ Tagetik")
+
+    tax_parts = " + ".join(x[1:] for x in [
+        ftax(3), ftax(1), ftax(20), ftax(4), ftax(22), ftax(6),
+        ftax(7), ftax(16), ftax(18),
+        fop(0), fop(1), fop(2), fop(3),
+    ])
+    formula_hq_tax_sum = f"=({tax_parts}) / 1000000"
+
+    # ── HQ Tagetik item rows 3-38 (large block) ──────────────────────────────
+    fhq_tdk = {
+        i: f(tp_base + offset, col_hq, "Sheet1", file_HQ_Item)
+        for i, offset in enumerate(range(-1, 35), start=3)
+    }
+    # keys 3..38 → tp_base-1 … tp_base+33
+
+    # ── HQ Tagetik formula references carried forward ─────────────────────────
+    SH_TGT = "HQ Tagetik"
+    SH_REL = "New KPI Actual"
+    hq_ex_1 = extract_formula(file_path_Template_man, SH_TGT, 46, col_hq_tgt)
+    hq_ex_2 = extract_formula(file_path_Template_man, SH_TGT, 47, col_hq_tgt)
+    hq_ex_3 = extract_formula(file_path_Template_man, SH_TGT, 48, col_hq_tgt)
+    hq_ex_4 = extract_formula(file_path_Template_man, SH_TGT, 49, col_hq_tgt)
+
+    # ── NANO / UP calc ────────────────────────────────────────────────────────
+    f_nano = f"={f(row_nano, col_nano, 'Actual', file_paths_NANO_HFM)[1:]}*10^3"
+    f_up   = f"={f(18, 25, 'UP_Calculation', file_paths_UP_Calc)[1:]}*10^6"
+    f_energy = f(energy_row, col_hq, "Sheet1", file_HQ_Item)
+
+    # ── OSP formulas ──────────────────────────────────────────────────────────
+    f_osp1   = f(row_osp1 - 5, col_osp1, "Master")
+    f_osp2   = f"=-{f(row_osp2 - 5, col_osp2, 'Master')[1:]}"
+    f_ex_249 = extract_formula(file_path_Template_man, SH_REL, 249, col_KPI_write - 1)
+    f_249    = generate_excel_formula_249(month_number, file_path_OSP)
+    f_sum249 = f"={f_249[1:]}-{f_ex_249[1:]}"
+
+    f_osp_ex1  = extract_formula(file_path_Template_man, SH_REL, 239, col_KPI_write - 1)
+    f_osp_sum  = f"={f_osp1[1:]}-{f_osp_ex1[1:]}"
+
+    # ── OCP (OCS details) formulas ────────────────────────────────────────────
+    f_ocp1    = f(74, col_ocp, "OCS details")
+    f_ocp2    = f(81, col_ocp, "OCS details")
+    f_ocp_ex1 = extract_formula(file_path_Template_man, SH_REL, 482, col_KPI_write - 1)
+    f_ocp_ex2 = extract_formula(file_path_Template_man, SH_REL, 500, col_KPI_write - 1)
+    f_sum_ocp1 = f"={f_ocp_ex1[1:]}-({f_ocp1[1:]}+{f_ocp2[1:]})/10^6"
+    f_sum_ocp2 = f"={f_ocp_ex2[1:]}+({f_ocp1[1:]}+{f_ocp2[1:]})/10^6"
+
+    # ── OSP TGK formulas ──────────────────────────────────────────────────────
+    f_tgk1 = f(6 - 2,  col_osp_tgk, "Summary", file_paths_OSP_TGK)
+    f_tgk2 = f(13 - 2, col_osp_tgk, "Summary", file_paths_OSP_TGK)
+    f_tgk3 = f(20 - 2, col_osp_tgk, "Summary", file_paths_OSP_TGK)
+    f_tgk4 = f(27 - 2, col_osp_tgk, "Summary", file_paths_OSP_TGK)
+
+    # ── High Level Variance (Feuil1) ──────────────────────────────────────────
+    f_relief_1 = f(row_feuil, col_feuil, "Feuil1", file_paths_High_Level_Variance)
+
+    # ── Relief KD formulas ────────────────────────────────────────────────────
+    skd = "vs 2+10"
+    f_relief_2 = f(45, kd_cols[0], skd, file_paths_Relief_KD)
+    f_relief_3 = f(30, kd_cols[0], skd, file_paths_Relief_KD)
+    f_relief_4 = f(15, kd_cols[0], skd, file_paths_Relief_KD)
+    f_relief_5 = f(45, kd_cols[1], skd, file_paths_Relief_KD) if len(kd_cols) > 1 else "=0"
+    f_relief_6 = f(30, kd_cols[1], skd, file_paths_Relief_KD) if len(kd_cols) > 1 else "=0"
+
+    f_ex_rel1 = extract_formula(file_path_Template_man, "Relief", 80, col_Relief)
+
+    # Connectivity: cumulative or single-month
+    if month_number == 4:
+        f_relief_12 = f"={connectivity_var}"
+    else:
+        f_ex_rel5   = extract_formula(file_path_Template_man, "Relief", 87, col_Relief)
+        f_relief_12 = f"=({connectivity_var})-{f_ex_rel5[1:]}"
+
+    f_relief_2 = f"=-({f_relief_2[1:]})/1000-{f_ex_rel1[1:]}"
+    f_relief_3 = f"=-({f_relief_3[1:]})/1000"
+    f_relief_4 = f"=-({f_relief_4[1:]})/1000"
+    f_relief_5 = f"=-({f_relief_5[1:]})/1000"
+    f_relief_6 = f"=-({f_relief_6[1:]})/1000"
+
+    f_relief_9  = f(itp_rows[0] if itp_rows else 0, itp_cols[0] if itp_cols else 0,
+                    "BP25", file_paths_ITP)
+    f_relief_10 = f"=-({f(14, 10, 'Summary pivot', file_paths_Purchase_Price)[1:]})/10^6"
+
+    # ── UED formula ───────────────────────────────────────────────────────────
+    formula_ued_raw = extract_value_formula_latest(file_path_P_L, month_number)
+    f_ued_template  = extract_formula(file_path_Template_man, "P&L Actual", 340, col_PL_write - 1)
+    f_sum_UED       = f"=({formula_ued_raw[1:]}-{f_ued_template[1:]})/1000"
+
+    # ── MCCP formulas ─────────────────────────────────────────────────────────
+    f_mccp1 = f(208, col_mccp, "MCPP")
+    f_mccp2 = f(322, col_mccp, "MCPP")
+
+    # ── KPI Relief formulas ───────────────────────────────────────────────────
+    f_kpi_1   = f(row_rel_mz_imp,   col_Relief, "Relief")
+    f_kpi_2   = f(row_rel_ga_imp,   col_Relief, "Relief")
+    f_kpi_3   = f(reclass_row,      col_Reclass, "Reclass")
+    f_kpi_4   = f(row_rel_iln_nmuk, col_Relief, "Relief")
+    f_kpi_4_1 = f(row_rel_iln_nmuk + 1, col_Relief, "Relief")
+    f_kpi_5   = f(row_rel_itp_inf,  col_Relief, "Relief")
+    f_kpi_6   = f(row_rel_err_mz,   col_Relief, "Relief")
+    f_kpi_7   = f(row_rel_kd_nmuk,  col_Relief, "Relief")
+    f_kpi_8   = f(row_rel_kd_nmgr,  col_Relief, "Relief")
+    f_kpi_9   = f(row_rel_kd_nmisa, col_Relief, "Relief")
+    f_kpi_10  = f(row_rel_bat_nmuk,  col_Relief, "Relief")
+    f_kpi_11  = f(row_rel_bat_nmisa, col_Relief, "Relief")
+    f_kpi_111 = f(row_rel_ga_imp + 1, col_Relief, "Relief")
+    f_kpi_12  = f(row_rel_cev,       col_Relief, "Relief")
+    f_kpi_13  = f(row_rel_itp_nis,   col_Relief, "Relief")
+    f_kpi_14  = f(row_rel_bat_cancel, col_Relief, "Relief")
+    f_kpi_15  = f(row_rel_err_wd5,    col_Relief, "Relief")
+    f_kpi_16  = f(row_rel_top_daim,   col_Relief, "Relief")
+    f_kpi_17  = f(row_rel_inf_fmi,    col_Relief, "Relief")
+    f_kpi_18  = f(row_rel_recall,     col_Relief, "Relief")
+    f_kpi_conn = f(row_rel_conn,      col_Relief, "Relief")
+
+    # ── Summation shorthand helpers ───────────────────────────────────────────
+    def _sum(*formulas):
+        return " + ".join(x[1:] for x in formulas)
+
+    f_sum_kpi_1 = f"={_sum(f_kpi_2, f_kpi_3)}"
+    f_sum_kpi_2 = f"={_sum(f_kpi_4, f_kpi_4_1)}"
+    f_sum_kpi_3 = f"={_sum(f_kpi_7, f_kpi_8, f_kpi_9, f_kpi_10, f_kpi_11)}"
+    f_sum_kpi_4 = f"={_sum(f_kpi_conn, f_kpi_13)}"
+    f_sum_kpi_5 = f"={_sum(f_kpi_14, f_kpi_15, f_kpi_16, f_kpi_17)}"
+
+    # ── Manufacturing other-adjustments summation ─────────────────────────────
+    f_oth_adj   = f(row_oth_adj_mfg, col_ROP_NE, SH)
+    f_others_mf = f(row_others_mfg,  col_ROP_NE, SH)
+    f_sum_mfg_oth = f"{f_oth_adj} + {f_others_mf[1:]}"
+
+    # ── OEM summation (standard + others) ────────────────────────────────────
+    def _oem_sum(brand_idx):
+        return (
+            f"{f(oem_std[brand_idx], col_ROP_NE, SH)} + "
+            f"{f(oem_oth[brand_idx], col_ROP_NE, SH)[1:]}"
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  4.  CELL UPDATE TABLES
+    #      Format: (excel_row, excel_col, value_or_formula_string)
+    #      Rows/cols here are 1-based as openpyxl expects.
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Helper to shift 0-based col → 1-based excel col
+    c = lambda col0: col0 + 1
+    # Shorthand: build formula for ROP NE sheet at current month column
+    def fp(row): return f(row, col_ROP_NE, SH)
+
+    # ── Sheet: Reclass ────────────────────────────────────────────────────────
+    upd_reclass = [
+        (reclass_row - 2, c(col_Reclass + 1), Var_Converter),
+        (reclass_row + 1, c(col_Reclass + 1), var_converter_bJPY),
+        (reclass_row + 2, c(col_Reclass + 1), var_converter_mEUR),
+    ]
+
+    # ── Sheet: Relief ─────────────────────────────────────────────────────────
+    upd_relief = [
+        (78,  c(col_Relief + 1), ePWR_var),
+        (75,  c(col_Relief + 1), f_relief_1),
+        (80,  c(col_Relief + 1), f_relief_2),
+        (81,  c(col_Relief + 1), f_relief_3),
+        (82,  c(col_Relief + 1), f_relief_4),
+        (83,  c(col_Relief + 1), f_relief_5),
+        (84,  c(col_Relief + 1), f_relief_6),
+        (87,  c(col_Relief + 1), f_relief_12),
+        (95,  c(col_Relief + 1), f_relief_9),
+        (96,  c(col_Relief + 1), f_relief_10),
+    ]
+
+    # ── Sheet: HQ Tagetik ─────────────────────────────────────────────────────
+    col_hq_w = c(col_hq_tgt + 1)
+    upd_hq = [
+        # TDK rows 3-38 (tp_base ± offsets)
+        (9,  col_hq_w, fhq(-1)),  (10, col_hq_w, fhq(0)),
+        (11, col_hq_w, fhq(1)),   (12, col_hq_w, fhq(2)),
+        (13, col_hq_w, fhq(3)),   (14, col_hq_w, fhq(4)),
+        (15, col_hq_w, fhq(5)),   (16, col_hq_w, fhq(6)),
+        (17, col_hq_w, fhq(7)),   (18, col_hq_w, fhq(8)),
+        (19, col_hq_w, fhq(9)),   (20, col_hq_w, fhq(10)),
+        (21, col_hq_w, fhq(11)),  (22, col_hq_w, fhq(12)),
+        (23, col_hq_w, fhq(13)),  (24, col_hq_w, fhq(14)),
+        (25, col_hq_w, fhq(15)),  (26, col_hq_w, fhq(16)),
+        (27, col_hq_w, fhq(17)),  (28, col_hq_w, fhq(18)),
+        (29, col_hq_w, fhq(19)),  (30, col_hq_w, fhq(20)),
+        (31, col_hq_w, fhq(21)),  (32, col_hq_w, fhq(22)),
+        (33, col_hq_w, fhq(23)),  (34, col_hq_w, fhq(24)),
+        (35, col_hq_w, fhq(25)),  (36, col_hq_w, fhq(26)),
+        (37, col_hq_w, fhq(27)),  (38, col_hq_w, fhq(28)),
+        (39, col_hq_w, fhq(29)),  (40, col_hq_w, fhq(30)),
+        (41, col_hq_w, fhq(31)),  (42, col_hq_w, fhq(32)),
+        (43, col_hq_w, fhq(33)),  (44, col_hq_w, fhq(34)),
+        # carried-forward template formulas
+        (46, col_hq_w, hq_ex_1), (47, col_hq_w, hq_ex_2),
+        (48, col_hq_w, hq_ex_3), (49, col_hq_w, hq_ex_4),
+        # NANO / UP calc
+        (52, col_hq_w, f_nano),
+        (54, col_hq_w, f_up),
+        (67, col_hq_w, f_energy),
+        (69, col_hq_w, cafe_penalty_var),
+    ]
+
+    # ── Sheet: P&L Actual ─────────────────────────────────────────────────────
+    col_pl = c(col_PL_write)
+    upd_pl = [
+        # ── Retail / volume rows ──────────────────────────────────────────────
+        (5,  col_pl, fp(row_nissan_retail)),
+        (6,  col_pl, fp(row_infiniti_retail)),
+        (7,  col_pl, fp(row_datsun_retail)),
+        (9,  col_pl, fp(row_tiv)),
+        (10, col_pl, fp(row_ms_nissan)),
+        (11, col_pl, fp(row_ms_infiniti)),
+        (12, col_pl, fp(row_ms_datsun)),
+        (14, col_pl, fp(row_opening_stock)),
+        (15, col_pl, fp(row_nmuk)),
+        (16, col_pl, fp(row_nmisa)),
+        (17, col_pl, fp(row_nmgr)),
+        (19, col_pl, fp(row_purchase_vol)),
+        (20, col_pl, fp(row_total_in)),
+        (21, col_pl, fp(row_ew_nissan)),
+        (22, col_pl, fp(row_ew_infiniti)),
+        (23, col_pl, fp(row_ew_datsun)),
+        (25, col_pl, fp(row_exp_nissan)),
+        (26, col_pl, fp(row_exp_infiniti)),
+        (29, col_pl, fp(row_renault_trucks)),
+        (30, col_pl, fp(row_daimler)),
+        (31, col_pl, fp(row_renault)),
+        (32, col_pl, fp(row_gtr_idg)),
+        (34, col_pl, fp(row_captives)),
+        (36, col_pl, fp(row_scope_adj)),
+        (37, col_pl, fp(row_closing_stock)),
+        # fixed extra cells (column 20)
+        (10, 20, f(15, 18, SH)),
+        (11, 20, f(17, 18, SH)),
+        (12, 20, f(19, 18, SH)),
+        # ── NV brand rows ────────────────────────────────────────────────────
+        (39, col_pl, fp(row_nissan_nv)),
+        (40, col_pl, fp(row_nissan_bb)),
+        (42, col_pl, fp(row_infiniti_nv)),
+        (43, col_pl, fp(row_infiniti_bb)),
+        (45, col_pl, fp(row_datsun_nv)),
+        (46, col_pl, fp(row_datsun_bb)),
+        # ── UC ───────────────────────────────────────────────────────────────
+        (48, col_pl, fp(row_nissan_uc)),
+        (49, col_pl, fp(row_infiniti_uc)),
+        # ── After Sales ──────────────────────────────────────────────────────
+        (52, col_pl, fp(row_nissan_as)),
+        (53, col_pl, fp(row_infiniti_as)),
+        (54, col_pl, fp(row_datsun_as)),
+        # ── Export ───────────────────────────────────────────────────────────
+        (57, col_pl, fp(row_exp_nis_t)),
+        (58, col_pl, fp(row_exp_inf_t)),
+        # ── MZ conso ─────────────────────────────────────────────────────────
+        (60, col_pl, f(row_mz_x83,    col_MZ_conso, "MZ conso TGK")),
+        (61, col_pl, f(row_mz_trucks, col_MZ_conso, "MZ conso TGK")),
+        (62, col_pl, f(row_mz_pp_inter, col_MZ_conso, "MZ conso TGK")),
+        (63, col_pl, f(row_mz_cant,   col_MZ_conso, "MZ conso TGK")),
+        (64, col_pl, f(row_mz_h4bu,   col_MZ_conso, "MZ conso TGK")),
+        (65, col_pl, f(row_mz_scrap,  col_MZ_conso, "MZ conso TGK")),
+        (66, col_pl, f(row_mz_bat,    col_MZ_conso, "MZ conso TGK")),
+        (69, col_pl, f(row_mz_others, col_MZ_conso, "MZ conso TGK")),
+        # ── Nissan NV FMI block ───────────────────────────────────────────────
+        (73, col_pl, fp(trn_nis_nv)), (74, col_pl, fp(cos_nis_nv)),
+        (76, col_pl, fp(vme_nis_nv)), (78, col_pl, fp(fmi_nis_nv)),
+        # ── Infiniti NV ───────────────────────────────────────────────────────
+        (81, col_pl, fp(trn_inf_nv)), (82, col_pl, fp(cos_inf_nv)),
+        (84, col_pl, fp(vme_inf_nv)), (86, col_pl, fp(fmi_inf_nv)),
+        # ── Datsun NV ────────────────────────────────────────────────────────
+        (89, col_pl, fp(trn_dat_nv)), (90, col_pl, fp(cos_dat_nv)),
+        (92, col_pl, fp(vme_dat_nv)), (94, col_pl, fp(fmi_dat_nv)),
+        # ── UC ───────────────────────────────────────────────────────────────
+        (105, col_pl, fp(trn_nis_uc)), (106, col_pl, fp(cos_nis_uc)),
+        (108, col_pl, fp(vme_nis_uc)), (110, col_pl, fp(fmi_nis_uc)),
+        (113, col_pl, fp(trn_dat_uc)), (114, col_pl, fp(cos_dat_uc)),
+        (116, col_pl, fp(vme_dat_uc)), (118, col_pl, fp(fmi_dat_uc)),
+        # ── AS ───────────────────────────────────────────────────────────────
+        (137, col_pl, fp(trn_nis_as)), (138, col_pl, fp(cos_nis_as)),
+        (140, col_pl, fp(vme_nis_as)), (142, col_pl, fp(fmi_nis_as)),
+        (145, col_pl, fp(trn_inf_as)), (146, col_pl, fp(cos_inf_as)),
+        (148, col_pl, fp(vme_inf_as)), (150, col_pl, fp(fmi_inf_as)),
+        (153, col_pl, fp(trn_dat_as)), (154, col_pl, fp(cos_dat_as)),
+        (156, col_pl, fp(vme_dat_as)), (158, col_pl, fp(fmi_dat_as)),
+        # ── Export FMI ───────────────────────────────────────────────────────
+        (171, col_pl, fp(trn_nis_ex)), (172, col_pl, fp(cos_nis_ex)),
+        (174, col_pl, fp(vme_nis_ex)),
+        (178, col_pl, fp(trn_inf_ex)), (179, col_pl, fp(cos_inf_ex)),
+        (181, col_pl, fp(vme_inf_ex)), (183, col_pl, fp(fmi_inf_ex)),
+        # ── OMP ──────────────────────────────────────────────────────────────
+        (193, col_pl, fp(row_x83_rop)),      (194, col_pl, fp(row_f91r_rop)),
+        (195, col_pl, fp(row_pp_inter_rop)), (196, col_pl, fp(row_cant_rop)),
+        (197, col_pl, fp(row_parts_ren_rop)),(198, col_pl, fp(row_bat_oth_rop)),
+        (199, col_pl, fp(row_scraps_rop)),   (200, col_pl, fp(row_pensions_rop)),
+        (203, col_pl, fp(row_others_rop)),
+        # ── Manufacturing variable ────────────────────────────────────────────
+        (206, col_pl, fp(row_materials)),   (207, col_pl, fp(row_bo_reduct)),
+        (208, col_pl, fp(row_renault_tp)),  (209, col_pl, fp(row_ic_kd)),
+        (210, col_pl, fp(row_inbound_fr)),  (211, col_pl, fp(row_inbound_duty)),
+        (212, col_pl, fp(row_inhouse_dl)),  (213, col_pl, fp(row_bat_nmuk)),
+        (217, col_pl, f_sum_mfg_oth),
+        # ── Manufacturing fixed ───────────────────────────────────────────────
+        (219, col_pl, fp(row_core_fixed)),  (220, col_pl, fp(row_pic_nissan)),
+        (221, col_pl, fp(row_regional_cost)),(222, col_pl, fp(row_vend_tool)),
+        (223, col_pl, fp(row_projects)),    (224, col_pl, fp(row_nesas)),
+        (225, col_pl, fp(row_bat_fixed)),   (226, col_pl, fp(row_inf_fixed_gd1a)),
+        (227, col_pl, fp(row_maint_dd)),    (228, col_pl, fp(row_gd1a_shift)),
+        (229, col_pl, fp(row_supp_claims)), (230, col_pl, fp(row_supp_claims + 1)),
+        # ── OCS detail rows (ocs_row[0] + 0..36) ─────────────────────────────
+        *[(235 + i, col_pl, fp(ocs_row[0] + i)) for i in range(37)],
+        # ── OEM blocks (3 brands) ────────────────────────────────────────────
+        (275, col_pl, fp(oem_trn[0])), (276, col_pl, _oem_sum(0)),
+        (277, col_pl, fp(oem_mgn[0])), (278, col_pl, fp(oem_veh[0])),
+        (279, col_pl, fp(oem_log[0])), (280, col_pl, fp(oem_roy[0])),
+        (282, col_pl, fp(oem_trn[1])), (283, col_pl, _oem_sum(1)),
+        (284, col_pl, fp(oem_mgn[1])), (285, col_pl, fp(oem_veh[1])),
+        (286, col_pl, fp(oem_log[1])), (287, col_pl, fp(oem_roy[1])),
+        (289, col_pl, fp(oem_trn[2])), (290, col_pl, _oem_sum(2)),
+        (291, col_pl, fp(oem_mgn[2])), (292, col_pl, fp(oem_veh[2])),
+        (293, col_pl, fp(oem_log[2])), (294, col_pl, fp(oem_roy[2])),
+        # ── R&D (ROP NE) ─────────────────────────────────────────────────────
+        (304, col_pl, fp(row_func_rd)),
+        (305, col_pl, fp(row_nonfunc_rd)),
+        # ── R&D File ─────────────────────────────────────────────────────────
+        (307, col_pl, f(row_func_rd_rev,  col_r_and_d, "R&D")),
+        (308, col_pl, f(row_func_rd_cost, col_r_and_d, "R&D")),
+        (309, col_pl, f(row_nf_rd_rev,    col_r_and_d, "R&D")),
+        (310, col_pl, f(row_nf_rd_cost,   col_r_and_d, "R&D")),
+        # ── G&A ──────────────────────────────────────────────────────────────
+        (313, col_pl, fp(idx_labour[0])),  (314, col_pl, fp(idx_is[0])),
+        (315, col_pl, fp(idx_dep[0])),     (316, col_pl, fp(idx_prov[0])),
+        (317, col_pl, fp(idx_overhead[0])),
+        (319, col_pl, fp(idx_labour[1])),  (320, col_pl, fp(idx_is[1])),
+        (321, col_pl, fp(idx_dep[1])),     (322, col_pl, fp(idx_prov[1])),
+        (323, col_pl, fp(idx_overhead[1])),
+        (325, col_pl, fp(idx_labour[2])),  (326, col_pl, fp(idx_is[2])),
+        (327, col_pl, fp(idx_dep[2])),     (328, col_pl, fp(idx_prov[2])),
+        (329, col_pl, fp(idx_overhead[2])),
+        # ── HQ aggregations ───────────────────────────────────────────────────
+        (338, col_pl, formula_hq_sum),
+        (339, col_pl, formula_hq_tax_sum),
+        (340, col_pl, f_sum_UED),
+    ]
+
+    # ── Sheet: New KPI Actual ─────────────────────────────────────────────────
+    col_kpi = c(col_KPI_write)
+    upd_kpi = [
+        (42,  col_kpi, f_kpi_1),
+        (45,  col_kpi, f_sum_kpi_1),
+        (205, col_kpi, f_mccp1),
+        (239, col_kpi, f_osp_sum),
+        (249, col_kpi, f_sum249),
+        (263, col_kpi, f_osp2),
+        (319, col_kpi, f_mccp2),
+        (382, col_kpi, f_sum_kpi_2),
+        (383, col_kpi, f_kpi_6),
+        (384, col_kpi, f_sum_kpi_3),
+        (387, col_kpi, f_kpi_111),
+        (390, col_kpi, f_kpi_12),
+        (391, col_kpi, f_sum_kpi_4),
+        (394, col_kpi, f_sum_kpi_5),
+        (402, col_kpi, f_kpi_5),
+        (421, col_kpi, f_kpi_18),
+        (482, col_kpi, f_sum_ocp1),
+        (500, col_kpi, f_sum_ocp2),
+        (532, col_kpi, f_tgk1),
+        (533, col_kpi, f_tgk2),
+        (534, col_kpi, f_tgk3),
+    ]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  5.  WRITE THE FIRST OUTPUT FILE
+    # ══════════════════════════════════════════════════════════════════════════
+
+    sheet_names   = ["Reclass", "Relief", "HQ Tagetik", "P&L Actual", "New KPI Actual"]
+    all_updates   = [upd_reclass, upd_relief, upd_hq, upd_pl, upd_kpi]
+
+    legacy_path, result_path = paste_values_KPI_PL(
+        file_path_Template,
+        sheet_names,
+        all_updates,
+        month_number,
+        output_path,
+    )
+
+    logger.info(f"P&L output written → {result_path}  "
+                f"({time.time() - t0:.1f}s)")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  6.  HAND OFF TO ACT
+    # ══════════════════════════════════════════════════════════════════════════
+
+    ACT(
+        file_path_P_L, legacy_path,
+        df_P_L_ROP_NE, df_P_L_HQ,
+        file_path_OSP, df_OSP,
+        file_path_HMF, df_HMF_Managerial,
+        file_path_New_KPI, df_P_L_New_KPI,
+        file_HQ_Item, df_hQ_items,
+        file_goodwill,
+        df_r_and_d, df_MZ_conso, df_P_L_Relief,
+        df_P_L_PL, df_P_L_Reclass, df_P_L_MCCP, df_P_L_OCS,
+        df_New_KPI_CFMI, df_New_goodwill, df_Act,
+        df_1c_osp,
+        file_paths_High_Level_Variance, df_high_variance_feuil,
+        file_paths_Relief_KD, df_Relief_KD,
+        file_paths_Purchase_Price, df_Purchase_Price,
+        file_paths_UP_Calc, df_UP_Calc,
+        file_paths_NANO_HFM, df_nano_hfm,
+        file_paths_ITP, df_itp,
+        file_path_Template, file_path_Template_1,
+        month_number, Var_Converter, var_Cfmi,
+        file_path_Template_man_1, file_path_goodwill_template,
+        result_path, output_path,
+    )
+"""
+Submit_2_Helper_function.py
+============================
+All row/column search helpers, formula generators, and the main
+paste_values_KPI_PL writer used by Submit_2.py.
+
+KEY FIX – Excel link preservation
+----------------------------------
+openpyxl strips external workbook relationships when it loads and
+re-saves a file unless you explicitly tell it to keep them.
+Every load_workbook() call that writes back uses:
+    keep_links=True   – preserves [xl/externalLinks] relationships
+    keep_vba=False    – we don't need macros (set True if the template has VBA)
+    data_only=False   – we WRITE formulas, so we never want data_only=True here
+
+Cross-workbook formula strings ("='[C:/path/file.xlsx]Sheet'!A1") must use
+forward-slashes and must NOT be modified after they are built by
+generate_excel_formula(); openpyxl writes them verbatim.
+"""
+
+from __future__ import annotations
+
+import calendar
+import os
+import re
+from datetime import datetime
+from typing import Optional
+
+import numpy as np
+import openpyxl
+import pandas as pd
+
+# ─── fiscal-year label used in output file names ───────────────────────────
+_now = datetime.now()
+_fy_start = _now.year if _now.month >= 4 else _now.year - 1
+CURRENT_FY = f"{_fy_start}-{str(_fy_start + 1)[-2:]}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Section 1 – Row / column search helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def find_row_numbers(df: pd.DataFrame) -> dict[str, list[int]]:
+    """
+    Return a dict mapping normalised search-term → list of matching row indices
+    found anywhere in *df*.  Comparison is space-stripped, lowercase.
+    """
+    search_terms = [
+        "nissan retail volume", "infiniti retail volume", "datsun retail volume",
+        "registration nissan", "registration infiniti", "registration datsun",
+        "tiv", "market share",
+        "european wholesale volume - nissan",
+        "european wholesale volume - infiniti",
+        "european wholesale volume - datsun",
+        "market share - nissan", "market share - infiniti", "market share - datsun",
+        "opening stock", "nmuk", "nmisa", "nmgr", "production volume",
+        "purchase volume", "total in",
+        "export volume nissan", "export volume - datsun", "export volume - infiniti",
+        "export volume", "wholesale volume total",
+        "renault trucks", "daimler", "renault",
+        "gtr [idg]", "oem volume", "captives", "total out",
+        "scope adjustment", "closing stock",
+    ]
+    normalised = [t.replace(" ", "").lower() for t in search_terms]
+    df_norm = df.apply(lambda col: col.astype(str).str.lower().str.replace(" ", "", regex=False))
+    return {
+        term: df_norm[df_norm.apply(lambda row: term in row.values, axis=1)].index.tolist()
+        for term in normalised
+    }
+
+
+def search_turnover_in_dataframe(df: pd.DataFrame) -> dict[str, list[int]]:
+    """
+    Find 'turnover' in the first 4 columns then search ±22 rows for
+    brand-level sub-category rows.
+    """
+    df_lower = df.apply(lambda col: col.astype(str).str.lower())
+    turnover_row: Optional[int] = None
+    for col in df_lower.columns[:4]:
+        hits = df_lower[df_lower[col].str.contains("turnover", na=False)].index
+        if not hits.empty:
+            turnover_row = hits[0]
+            break
+    if turnover_row is None:
+        return {}
+
+    search_terms = [
+        "nissan nv", "nissan bb", "datsun nv", "datsun bb",
+        "infiniti nv", "infiniti bb",
+        "infiniti used cars", "nissan used cars",
+        "nissan after sales", "datsun after sales", "infiniti after sales",
+        "export nissan", "export datsun", "export infiniti",
+    ]
+    result: dict[str, list[int]] = {t: [] for t in search_terms}
+    window = df_lower.iloc[turnover_row: turnover_row + 22]
+    for term in search_terms:
+        for col in window.columns:
+            result[term].extend(
+                window[window[col].str.contains(term, na=False)].index.tolist()
+            )
+    return result
+
+
+def _find_fmi_indices(df: pd.DataFrame, start: int) -> Optional[tuple[int, int, int, int]]:
+    """Within df[start : start+8] find rows for FMI, TurnoverAj, COS Regional, VME."""
+    end = start + 8
+    block = df.iloc[start:end]
+    fmi   = block[block.isin(["FMI"]).any(axis=1)].index
+    trn   = block[block.isin(["TurnoverAj"]).any(axis=1)].index
+    cos_  = block[block.isin(["COS Regional"]).any(axis=1)].index
+    vme   = block[block.isin(["VME"]).any(axis=1)].index
+    if all(not x.empty for x in (fmi, trn, cos_, vme)):
+        return fmi[0], trn[0], cos_[0], vme[0]
+    return None
+
+
+def _brand_starts(df: pd.DataFrame, *labels: str) -> list[int]:
+    """Return first-occurrence row index for each label (lowercase, first 3 cols)."""
+    df_lower = df.iloc[:, 0:3].apply(
+        lambda col: col.str.lower() if col.dtype == "object" else col
+    )
+    result = []
+    for label in labels:
+        idx = df_lower[df_lower.isin([label]).any(axis=1)].index
+        if idx.empty:
+            raise ValueError(f"Required label '{label}' not found in first 3 columns.")
+        result.append(idx[0])
+    return result
+
+
+def find_fmi_row_nv(df: pd.DataFrame):
+    starts = _brand_starts(df, "nissan nv", "datsun nv", "infiniti nv", "total nv")
+    rows = [_find_fmi_indices(df, s) for s in starts]
+    if any(r is None for r in rows):
+        raise ValueError("FMI indices incomplete for NV section.")
+    return tuple(v for r in rows for v in r)
+
+
+def find_fmi_row_uc(df: pd.DataFrame):
+    starts = _brand_starts(df, "uc nissan", "uc infiniti", "total uc")
+    rows = [_find_fmi_indices(df, s) for s in starts]
+    if any(r is None for r in rows):
+        raise ValueError("FMI indices incomplete for UC section.")
+    return tuple(v for r in rows for v in r)
+
+
+def find_fmi_row_as(df: pd.DataFrame):
+    starts = _brand_starts(df, "as nissan", "as datsun", "as infiniti", "total as")
+    rows = [_find_fmi_indices(df, s) for s in starts]
+    if any(r is None for r in rows):
+        raise ValueError("FMI indices incomplete for AS section.")
+    return tuple(v for r in rows for v in r)
+
+
+def find_fmi_row_export(df: pd.DataFrame):
+    starts = _brand_starts(df,
+                           "nissan export", "datsun export", "infiniti export", "total export")
+    rows = [_find_fmi_indices(df, s) for s in starts]
+    if any(r is None for r in rows):
+        raise ValueError("FMI indices incomplete for Export section.")
+    return tuple(v for r in rows for v in r)
+
+
+def _search_terms_from_anchor(
+    df: pd.DataFrame,
+    anchor_substring: str,
+    search_terms: list[str],
+    window: int = 28,
+) -> dict[str, list[int]]:
+    """Generic: find anchor in first 4 cols, then search *window* rows below."""
+    df_lower = df.apply(lambda col: col.astype(str).str.lower())
+    anchor_row: Optional[int] = None
+    for col in df_lower.columns[:4]:
+        hits = df_lower[df_lower[col].str.contains(anchor_substring, na=False)].index
+        if not hits.empty:
+            anchor_row = hits[0]
+            break
+    if anchor_row is None:
+        return {t: [] for t in search_terms}
+    block = df_lower.iloc[anchor_row: anchor_row + window]
+    result: dict[str, list[int]] = {t: [] for t in search_terms}
+    for term in search_terms:
+        pat = re.escape(term)
+        for col in block.columns:
+            result[term].extend(
+                block[block[col].str.contains(pat, na=False)].index.tolist()
+            )
+    return result
+
+
+def search_omp_terms(df: pd.DataFrame) -> dict[str, list[int]]:
+    return _search_terms_from_anchor(df, "omp", [
+        "x83 sales to renault",
+        "f91r sales to renault trucks",
+        "production parts sales to inter-companies",
+        "cantabria sales to third party",
+        "parts sales to renault",
+        "battery plant other costs",
+        "scraps sales",
+        "pensions",
+        "others",
+    ])
+
+
+def search_manufacturing_terms(df: pd.DataFrame) -> dict[str, list[int]]:
+    return _search_terms_from_anchor(df, "manufacturing", [
+        "materials costs",
+        "b/o cost reduction",
+        "renault tp",
+        "intercompany parts / kd",
+        "inbound freight / insurance",
+        "inbound duty",
+        "inhouse / direct labour",
+        "battery (nmuk)",
+        "events",
+        "infiniti mz variable",
+        "other adjustments",
+        "others",
+        "core fixed",
+        "pic (nissan)",
+        "regional cost",
+        "vendor tooling depreciation",
+        "projects",
+        "nesas/nisa manufacturing",
+        "battery fixed",
+        "infiniti fixed cost (gd1a)",
+        "maintenance of existing models (d&d)",
+        "gd1a top position shift to icp",
+        "supplier claims & other",
+    ])
+
+
+def MZ_Sheet_terms(df: pd.DataFrame) -> dict[str, list[int]]:
+    return _search_terms_from_anchor(df, "turnover oem/ omp", [
+        "x83 sales to renault",
+        "sales to renault trucks",
+        "production parts sales to inter-companies",
+        "cantabria sales to third party",
+        "parts sales to renault (h4bu camshaft)",
+        "scrap sales",
+        "battery plant to",
+        "others",
+        "other adjustments",
+    ], window=10)
+
+
+def find_financial_indices(df: pd.DataFrame):
+    """Return (labour, IS, dep, provision, overhead) index lists from G&A block."""
+    df_lower = df.iloc[:, 0:3].apply(
+        lambda col: col.str.lower() if col.dtype == "object" else col
+    )
+    starts = df_lower[df_lower.isin(["g&a"]).any(axis=1)].index
+    if starts.empty:
+        raise ValueError("'g&a' not found in first 3 columns.")
+    start = starts[0]
+    end   = min(start + 24, len(df))
+    block = df.iloc[start:end]
+    return (
+        block[block.isin(["Labour Costs"]).any(axis=1)].index,
+        block[block.isin(["IS Costs"]).any(axis=1)].index,
+        block[block.isin(["Depreciation"]).any(axis=1)].index,
+        block[block.isin(["Provision for Doubtful Debts"]).any(axis=1)].index,
+        block[block.isin(["Overheads"]).any(axis=1)].index,
+    )
+
+
+def find_oem_terms(df: pd.DataFrame):
+    df_lower = df.iloc[:, 0:3].apply(
+        lambda col: col.str.lower() if col.dtype == "object" else col
+    )
+    starts = df_lower[df_lower.isin(["oem"]).any(axis=1)].index
+    if starts.empty:
+        raise ValueError("'oem' not found in first 3 columns.")
+    start = starts[0]
+    end   = min(start + 24, len(df))
+    block = df.iloc[start:end]
+    return (
+        block[block.isin(["Turnover"]).any(axis=1)].index,
+        block[block.isin(["Standard Cost"]).any(axis=1)].index,
+        block[block.isin(["Marginal Profit"]).any(axis=1)].index,
+        block[block.isin(["Vehicle enhancement"]).any(axis=1)].index,
+        block[block.isin(["Logistics"]).any(axis=1)].index,
+        block[block.isin(["Royalty"]).any(axis=1)].index,
+        block[block.isin(["Others"]).any(axis=1)].index,
+        block[block.isin(["EOP"]).any(axis=1)].index,
+    )
+
+
+def find_ocs_terms(df: pd.DataFrame):
+    df_lower = df.iloc[:, 0:3].apply(
+        lambda col: col.str.lower() if col.dtype == "object" else col
+    )
+    starts = df_lower[df_lower.isin(["ocs"]).any(axis=1)].index
+    if starts.empty:
+        raise ValueError("'ocs' not found in first 3 columns.")
+    return starts
+
+
+def search_rd_terms(df: pd.DataFrame) -> dict[str, list[int]]:
+    df_lower = df.apply(lambda col: col.astype(str).str.lower())
+    result: dict[str, list[int]] = {"functional r&d": [], "non functional r&d": []}
+    for term in result:
+        for col in df_lower.columns:
+            result[term].extend(
+                df_lower[df_lower[col].str.contains(term, na=False)].index.tolist()
+            )
+    return result
+
+
+def find_R_and_D_File(df: pd.DataFrame) -> dict[str, list[int]]:
+    df_lower = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+    last = df.index[-1]
+    start, end = last - 15, last
+    terms = [
+        "functional r&d revenue",
+        "functional r&d cost",
+        "non functional r&d revenue",
+        "non functional r&d cost",
+    ]
+    return {
+        t: df_lower.iloc[start:end][df_lower.isin([t]).any(axis=1)].index.tolist()
+        for t in terms
+    }
+
+
+def find_transfer_price_adjustment(df: pd.DataFrame) -> list[int]:
+    pat = re.sub(r"\s+", "", "nrv").lower()
+    df_lower = df.applymap(
+        lambda x: re.sub(r"\s+", "", x.lower()) if isinstance(x, str) else x
+    )
+    return df_lower[
+        df_lower.apply(lambda row: row.astype(str).str.contains(pat, regex=True).any(), axis=1)
+    ].index.tolist()
+
+
+def export_ITP_Export(df: pd.DataFrame) -> list[int]:
+    pat = re.escape("itp ( revenue )".replace(" ", ""))
+    df_lower = df.applymap(
+        lambda x: re.sub(r"\s+", "", x.lower()) if isinstance(x, str) else x
+    )
+    return df_lower[
+        df_lower.apply(lambda row: row.astype(str).str.contains(pat, regex=True).any(), axis=1)
+    ].index.tolist()
+
+
+def energy_tgk_68(df: pd.DataFrame) -> list[int]:
+    pat = re.escape("energy business (not inside as for bp)".replace(" ", ""))
+    df_lower = df.applymap(
+        lambda x: re.sub(r"\s+", "", x.lower()) if isinstance(x, str) else x
+    )
+    return df_lower[
+        df_lower.apply(lambda row: row.astype(str).str.contains(pat, regex=True).any(), axis=1)
+    ].index.tolist()
+
+
+def tax_and_public(df: pd.DataFrame) -> list[int]:
+    pat = "tax and public dues - other tax and public dues"
+    df_lower = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+    return df_lower[
+        df_lower.apply(lambda row: row.astype(str).str.contains(pat).any(), axis=1)
+    ].index.tolist()
+
+
+def operating_profit(df: pd.DataFrame) -> list[int]:
+    pat = "operating profit - aprite"
+    df_lower = df.applymap(lambda x: x.lower() if isinstance(x, str) else x)
+    return df_lower[
+        df_lower.apply(lambda row: row.astype(str).str.contains(pat).any(), axis=1)
+    ].index.tolist()
+
+
+def relief_search_terms_new(df: pd.DataFrame) -> dict[str, int | str]:
+    """
+    Search from row 70 onwards for each relief-section label.
+    Returns {term: row_index} or {term: 'Not found'}.
+    """
+    terms = [
+        "recall service/campaigns",
+        "kd itp (nmuk)", "kd itp (nmisa)", "kd itp (nmgr)",
+        "connectivity",
+        "itp cbu nissan", "itp cbu infiniti",
+        "iln export (nmuk)", "iln export (nmisa)",
+        "error correction in mz (?)",
+        "export", "mz impairment", "g&a impairment",
+        "compact ev/vt impairment",
+        "battery 40 kw itp ( nmuk )", "battery 40 kw itp ( nmisa )",
+        "battery cancelation",
+        "error correction in mz (after wd5)",
+        "top daimler correction (after wd5)",
+        "infiniti fmi correction (after wd5)",
+    ]
+    search_df = df.iloc[70:].apply(
+        lambda col: col.astype(str).str.lower().str.replace(r"\s+", "", regex=True)
+    )
+    results: dict[str, int | str] = {}
+    for term in terms:
+        pat = re.escape(term.replace(" ", "").replace("(", r"\(").replace(")", r"\)").replace("?", r"\?"))
+        hits = search_df[
+            search_df.apply(lambda row: row.str.contains(pat, regex=True).any(), axis=1)
+        ].index
+        results[term] = hits[0] if not hits.empty else "Not found"
+    return results
+
+
+def G_and_A_Reliev1(df: pd.DataFrame) -> Optional[int]:
+    """Return first row where any cell starts with 'meur' (case-insensitive)."""
+    hits = df[df.apply(
+        lambda row: row.astype(str).str.lower().str.startswith("meur").any(), axis=1
+    )].index
+    return hits[0] if not hits.empty else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Section 2 – Column / month index finders
+# ══════════════════════════════════════════════════════════════════════════════
+
+def find_columns_with_month_short(df: pd.DataFrame, month_number: int) -> int:
+    """
+    Find the column index of the cell containing the 3-letter month abbreviation
+    (e.g. 'apr') and return the offset column for *month_number*.
+    """
+    abbr = {4:"apr",5:"may",6:"jun",7:"jul",8:"aug",9:"sep",
+            10:"oct",11:"nov",12:"dec",1:"jan",2:"feb",3:"mar"}
+    target = abbr[month_number]
+    for _, row in df.iterrows():
+        for col_name, val in row.items():
+            if str(val).lower() == target:
+                col_idx = df.columns.get_loc(col_name)
+                # offset from April baseline
+                return col_idx + (month_number - 4) % 12
+    # fallback: calculate from April position
+    for _, row in df.iterrows():
+        for col_name, val in row.items():
+            if str(val).lower() == "apr":
+                col_idx = df.columns.get_loc(col_name)
+                return col_idx + (month_number - 4) % 12
+    return 4 + (month_number - 4) % 12   # hard fallback
+
+
+def find_columns_with_month_long(df: pd.DataFrame, month_number: int) -> int:
+    """Same as above but looks for the full month name ('april', 'january', …)."""
+    full = {1:"january",2:"february",3:"march",4:"april",5:"may",6:"june",
+            7:"july",8:"august",9:"september",10:"october",11:"november",12:"december"}
+    target = full[month_number]
+    for _, row in df.iterrows():
+        for col_name, val in row.items():
+            if str(val).lower() == target:
+                col_idx = df.columns.get_loc(col_name)
+                return col_idx + (month_number - 4) % 12
+    # fallback: anchor on april
+    for _, row in df.iterrows():
+        for col_name, val in row.items():
+            if str(val).lower() == "april":
+                col_idx = df.columns.get_loc(col_name)
+                return col_idx + (month_number - 4) % 12
+    return 4 + (month_number - 4) % 12
+
+
+def find_month_columns_Relief_KD(df: pd.DataFrame, month_number: int) -> list[int]:
+    """Return the two column indices where the month name appears in the KD sheet."""
+    full = {1:"January",2:"February",3:"March",4:"April",5:"May",6:"June",
+            7:"July",8:"August",9:"September",10:"October",11:"November",12:"December"}
+    name = full[month_number]
+    found: list[int] = []
+    for _, row in df.iterrows():
+        tmp = [ci for ci, v in enumerate(row)
+               if isinstance(v, str) and name in v]
+        if len(tmp) >= 2:
+            found.extend(tmp[:2])
+            break
+        elif tmp:
+            found.extend(tmp)
+        if len(found) >= 2:
+            break
+    return sorted(set(found))[:2]
+
+
+def find_month_columns_export(df: pd.DataFrame, month_number: int) -> list[int]:
+    """Return column indices where the ITP month code (M01–M12) appears."""
+    codes = {4:"M01",5:"M02",6:"M03",7:"M04",8:"M05",9:"M06",
+             10:"M07",11:"M08",12:"M09",1:"M10",2:"M11",3:"M12"}
+    code = codes[month_number]
+    found: set[int] = set()
+    for _, row in df.iterrows():
+        for ci, val in enumerate(row):
+            if isinstance(val, str) and code in val:
+                found.add(ci)
+    return sorted(found)
+
+
+def find_indices_feuil(df: pd.DataFrame, month_number: int) -> tuple[int, int]:
+    """Return (row_index_of_NE_Total, col_index_of_month) in the Feuil1 sheet."""
+    df_lower = df.apply(
+        lambda row: row.map(lambda x: x.lower() if isinstance(x, str) else x), axis=1
+    )
+    hits = df_lower[df_lower.apply(lambda row: "ne total" in row.values, axis=1)].index
+    if hits.empty:
+        raise ValueError("'NE Total' not found in Feuil1.")
+    row_idx = hits[0]
+    abbr = {1:"jan",2:"feb",3:"mar",4:"apr",5:"may",6:"jun",
+            7:"jul",8:"aug",9:"sep",10:"oct",11:"nov",12:"dec"}
+    name = abbr[month_number]
+    col_idx = df_lower.apply(lambda row: name in row.values, axis=1).idxmax()
+    return row_idx, col_idx
+
+
+def find_op_and_month(df: pd.DataFrame, month_number: int) -> tuple[Optional[int], Optional[int]]:
+    """Return (row of 'OP', column of month name) in the NANO HFM sheet."""
+    full = {1:"january",2:"february",3:"march",4:"april",5:"may",6:"june",
+            7:"july",8:"august",9:"september",10:"october",11:"november",12:"december"}
+    op_row: Optional[int] = None
+    for idx, row in df.iterrows():
+        if "op" in row.astype(str).str.lower().values:
+            op_row = idx
+            break
+    month_col: Optional[int] = None
+    name = full[month_number]
+    for ci, col_name in enumerate(df.columns):
+        if name in col_name.lower():
+            month_col = ci
+            break
+    return op_row, month_col
+
+
+def find_outside_profit_and_month_value(
+    df: pd.DataFrame, month_number: int
+) -> tuple[Optional[int], Optional[int]]:
+    adj = (month_number - 4) % 12
+    for row_idx, row in df.iterrows():
+        for ci, val in enumerate(row):
+            if str(val).replace(" ", "").lower() == "outsideprofit":
+                return row_idx + 1, ci + adj
+    return None, None
+
+
+def find_second_column_for_outside_profit(
+    df: pd.DataFrame, month_number: int
+) -> tuple[Optional[int], Optional[int]]:
+    adj = (month_number - 4) % 12
+    count = 0
+    for row_idx, row in df.iterrows():
+        for ci, val in enumerate(row):
+            if str(val).replace(" ", "").lower() == "outsideprofit":
+                count += 1
+                if count == 2:
+                    return row_idx + 1, ci + adj
+    return None, None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Section 3 – Excel formula builders
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _col_letter(col_num: int) -> str:
+    """Convert 1-based column number to Excel letter(s).  1→A, 27→AA, etc."""
+    letter = ""
+    while col_num > 0:
+        col_num, rem = divmod(col_num - 1, 26)
+        letter = chr(65 + rem) + letter
+    return letter
+
+
+def generate_excel_formula(
+    row_num: int,
+    col_num: int,
+    sheet_name: Optional[str] = None,
+    file_name: Optional[str] = None,
+) -> str:
+    """
+    Build an Excel cell-reference formula string.
+
+    Parameters
+    ----------
+    row_num   : 0-based pandas row index  → Excel row = row_num + 2
+    col_num   : 0-based pandas col index  → Excel col = col_num + 1
+    sheet_name: worksheet name (optional)
+    file_name : full path of the source workbook (optional).
+                Backslashes are converted to forward-slashes for Excel
+                cross-workbook formula compatibility.
+
+    Returns a string starting with '=' ready to be written into a cell.
+
+    LINK SAFETY
+    -----------
+    When file_name is supplied the formula includes the full path so that
+    the link is ABSOLUTE.  openpyxl writes this verbatim and Excel resolves
+    it correctly when the output file is opened from any location, provided
+    the source file hasn't moved.
+    """
+    excel_row = row_num + 2
+    excel_col = col_num + 1
+    col_letter = _col_letter(excel_col)
+
+    if file_name and sheet_name:
+        # Normalise path separators → forward slash (Excel cross-book links)
+        safe_path = file_name.replace("\\", "/")
+        return f"='[{safe_path}]{sheet_name}'!{col_letter}{excel_row}"
+    elif sheet_name:
+        return f"='{sheet_name}'!{col_letter}{excel_row}"
+    else:
+        return f"={col_letter}{excel_row}"
+
+
+def generate_excel_formula_249(month_number: int, file_path: str) -> str:
+    """
+    Build the SUMIF formula for row 249 (Infiniti OSP line).
+    Column is derived from month_number relative to April.
+    """
+    # Column index: AZ = 52, AA = 27 … build offset from April baseline
+    base_col = 2 * 26 + 14   # = 66 = BN in 1-based; original logic kept
+    col_idx  = base_col + month_number - 4
+    col_let  = _col_letter(col_idx)
+    return (
+        f"=SUMIF('Master'!$X:$X,\"Infiniti\",'Master'!{col_let}:{col_let})"
+        f"/'Master'!{col_let}$1*1000"
+    )
+
+
+def extract_formula(
+    file_path: str,
+    sheet_name: str,
+    row_number: int,
+    column_index: int,
+) -> Optional[str]:
+    """
+    Read a formula (or value) from an existing workbook cell.
+
+    Uses data_only=False so we get the formula text, not the cached result.
+    keep_links=True prevents openpyxl from breaking existing external refs
+    during the read (even though we do not save here).
+    """
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=False, keep_links=True)
+        ws = wb[sheet_name]
+        cell = ws.cell(row=row_number, column=column_index + 1)
+        return cell.value  # formula string if the cell has one
+    except KeyError:
+        raise ValueError(f"Sheet '{sheet_name}' not found in '{file_path}'.")
+    except Exception as e:
+        raise RuntimeError(f"extract_formula error ({file_path}, {sheet_name}, "
+                           f"row={row_number}, col={column_index}): {e}") from e
+
+
+def extract_value_formula_latest(file_name: str, month_number: int) -> str:
+    """
+    Return a formula string referencing cell V8 (0-based: row 6, col 21)
+    in the HFM sheet for *month_number*.
+    For months after April the formula is a difference vs the previous month's sheet.
+    """
+    abbr = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+            7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+    sheet_curr = f"HFM {abbr[month_number]}"
+    safe_path  = file_name.replace("\\", "/")
+    col_letter = _col_letter(22)   # col index 21 (0-based) → 22 (1-based)
+    excel_row  = 8                 # row 6 (0-based) → row 8 (1-based, offset +2)
+
+    formula_curr = f"='[{safe_path}]{sheet_curr}'!{col_letter}{excel_row}"
+    if month_number == 4:
+        return formula_curr
+
+    prev_num   = month_number - 1 if month_number > 1 else 12
+    sheet_prev = f"HFM {abbr[prev_num]}"
+    formula_prev = f"='[{safe_path}]{sheet_prev}'!{col_letter}{excel_row}"
+    return f"(({formula_curr[1:]} - {formula_prev[1:]})"
+
+
+def manage_sheet_visibility(file_name: str, month_number: int) -> str:
+    """Unhide current month's HFM sheet and hide the previous month's."""
+    abbr = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+            7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+    curr_sheet = f"HFM {abbr[month_number]}"
+    prev_num   = month_number - 1 if month_number > 1 else 12
+    prev_sheet = f"HFM {abbr[prev_num]}"
+
+    wb = openpyxl.load_workbook(file_name, keep_links=True)
+    if curr_sheet in wb.sheetnames:
+        wb[curr_sheet].sheet_state = "visible"
+    else:
+        raise ValueError(f"Sheet '{curr_sheet}' not found.")
+    if prev_sheet in wb.sheetnames:
+        wb[prev_sheet].sheet_state = "hidden"
+    wb.save(file_name)
+    return f"Unhid '{curr_sheet}', hid '{prev_sheet}'."
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Section 4 – Main writer: paste_values_KPI_PL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def paste_values_KPI_PL(
+    original_file_path: str,
+    sheet_names: list[str],
+    cell_updates_list: list[list[tuple]],
+    month_name: int,
+    output_path: str,
+) -> tuple[str, str]:
+    """
+    Write formulas / values into the copied template workbook and save it.
+
+    LINK PRESERVATION STRATEGY
+    ---------------------------
+    1.  keep_links=True  → openpyxl retains the [xl/externalLinks] part of
+        the OOXML package.  Without this flag openpyxl silently removes all
+        cross-workbook relationship entries and Excel shows '#REF!' on every
+        external formula when the saved file is opened.
+
+    2.  We write formula strings (those starting with '=') directly as cell
+        values.  openpyxl serialises them as <f>…</f> nodes.  Excel recalc-
+        ulates them on first open.  We never write cached values (data_only).
+
+    3.  We do NOT use keep_vba=True here because the template is a plain xlsx.
+        If your template is xlsm (has macros) change this to keep_vba=True.
+
+    Parameters
+    ----------
+    original_file_path  : path to the copied + Master-injected template
+    sheet_names         : ordered list of sheet names matching cell_updates_list
+    cell_updates_list   : list of [(row, col, value_or_formula), …] per sheet
+    month_name          : 1-based month integer (used for the output filename)
+    output_path         : directory where the result file is saved
+
+    Returns
+    -------
+    (legacy_path_unused, full_output_path)
+    """
+    wb = openpyxl.load_workbook(original_file_path, keep_links=True)
+
+    for sheet_name, updates in zip(sheet_names, cell_updates_list):
+        if sheet_name not in wb.sheetnames:
+            raise ValueError(f"Sheet '{sheet_name}' not in workbook '{original_file_path}'.")
+        ws = wb[sheet_name]
+        for row, col, value in updates:
+            if value is None:
+                continue
+            cell = ws.cell(row=row, column=col)
+            # Write formula string directly; write non-string scalars as-is
+            cell.value = value
+
+    month_label = calendar.month_name[month_name]
+    out_name    = f"FY25 P&L Summary {month_label}_output_FY{CURRENT_FY}.xlsx"
+    out_full    = os.path.join(output_path, out_name)
+
+    # Also keep a copy in P_and_L Actuals Files/ for legacy callers
+    legacy_dir  = os.path.join(os.getcwd(), "P_and_L Actuals Files")
+    os.makedirs(legacy_dir, exist_ok=True)
+    legacy_path = os.path.join(legacy_dir, out_name)
+
+    wb.save(out_full)
+    # Save second copy (same workbook object, still in memory)
+    wb.save(legacy_path)
+
+    print(f"Saved output → {out_full}")
+    print(f"Saved legacy → {legacy_path}")
+    return legacy_path, out_full
