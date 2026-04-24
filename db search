@@ -1,0 +1,732 @@
+import sys
+import os
+import re
+from pathlib import Path
+from datetime import datetime
+ 
+import pandas as pd
+from pptx import Presentation
+from configparser import ConfigParser
+ 
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QTableView, QLineEdit,
+    QSizePolicy, QGridLayout, QFileDialog, QMessageBox, QTabWidget,
+    QComboBox, QStyledItemDelegate, QAbstractItemView, QScrollArea
+)
+from PyQt6.QtCore import Qt, QSignalBlocker
+from PyQt6.QtGui import QStandardItemModel, QStandardItem, QIcon
+ 
+ 
+FILTER_COLS = [
+    "Category", "Scenarios", "Functions", "Functions-View",
+    "Year", "Month", "Region", "Criteria"
+]
+ 
+#  Relative path
+BASE_DIR = Path(__file__).resolve().parent
+MASTER_XLSX_PATH = BASE_DIR / "database" / "Segregateddata.xlsx"
+ 
+ 
+class CheckableComboBox(QComboBox):
+    """
+    Multi-select combo box with checkboxes (PyQt6).
+    - Keeps popup open during multi selection
+    - Can refresh items while keeping checked selections
+    """
+    class Delegate(QStyledItemDelegate):
+        def sizeHint(self, option, index):
+            size = super().sizeHint(option, index)
+            size.setHeight(22)
+            return size
+ 
+    def __init__(self, placeholder="Select...", *args, **kwargs):
+        super().__init__(*args, **kwargs)
+ 
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setPlaceholderText(placeholder)
+ 
+        self.setItemDelegate(CheckableComboBox.Delegate())
+ 
+        # Keep popup open while selecting
+        self.view().pressed.connect(self._handle_item_pressed)
+ 
+        # Update displayed text when checks change
+        self.model().dataChanged.connect(self._update_text)
+ 
+    def addItem(self, text: str):
+        item = QStandardItem(str(text))
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+        self.model().appendRow(item)
+ 
+    def addItems(self, texts):
+        for t in texts:
+            self.addItem(t)
+ 
+    def checkedItems(self):
+        selected = []
+        for i in range(self.model().rowCount()):
+            it = self.model().item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                selected.append(it.text())
+        return selected
+ 
+    def clearChecks(self):
+        with QSignalBlocker(self.model()):
+            for i in range(self.model().rowCount()):
+                self.model().item(i).setCheckState(Qt.CheckState.Unchecked)
+        self._update_text()
+ 
+    def _update_text(self):
+        selected = self.checkedItems()
+        self.lineEdit().setText(", ".join(selected))
+ 
+    def _handle_item_pressed(self, index):
+        item = self.model().itemFromIndex(index)
+        if item.checkState() == Qt.CheckState.Checked:
+            item.setCheckState(Qt.CheckState.Unchecked)
+        else:
+            item.setCheckState(Qt.CheckState.Checked)
+ 
+        # Keep popup open for multi-select
+        self.showPopup()
+ 
+    def setItemsKeepChecks(self, values):
+        """
+        Refresh items while preserving checked selections where possible.
+        """
+        values = [str(v) for v in values if str(v).strip() != ""]
+        values = sorted(set(values))
+ 
+        currently_checked = set(self.checkedItems())
+ 
+        with QSignalBlocker(self.model()):
+            self.model().clear()
+            for v in values:
+                item = QStandardItem(v)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setData(
+                    Qt.CheckState.Checked if v in currently_checked else Qt.CheckState.Unchecked,
+                    Qt.ItemDataRole.CheckStateRole
+                )
+                self.model().appendRow(item)
+ 
+        self._update_text()
+ 
+ 
+class DataExplorer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+ 
+        self.loadDefaults()
+        self.setWindowTitle("Commentary Engine")
+ 
+        # Resizable window
+        self.resize(1100, 700)
+        self.setMinimumSize(900, 600)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+ 
+        self.df = pd.DataFrame()
+        self.current_df = pd.DataFrame()
+        self.filter_widgets = {}  # col -> CheckableComboBox
+ 
+        # Central widget
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.layout = QVBoxLayout(self.central_widget)
+ 
+        # Tabs
+        self.tabs = QTabWidget()
+        self.layout.addWidget(self.tabs)
+ 
+        # ---------------- TAB 1: SEARCH ----------------
+        self.search_tab = QWidget()
+        self.search_layout = QVBoxLayout(self.search_tab)
+ 
+        # Heading
+        self.heading_label = QLabel("Commentary Search Engine")
+        self.heading_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #2E86C1;")
+        self.heading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.search_layout.addWidget(self.heading_label)
+ 
+        # Download button
+        self.download_button = QPushButton()
+        self.download_button.setIcon(QIcon("Picture1.png"))
+        self.download_button.setToolTip("Download Filtered Data")
+        self.download_button.setStyleSheet("background-color: transparent; border: none;")
+        self.download_button.clicked.connect(self.download_data)
+        self.search_layout.addWidget(self.download_button, alignment=Qt.AlignmentFlag.AlignLeft)
+ 
+        # -------- FILTERS (TOP) --------
+        self.filter_scroll_area = QScrollArea()
+        self.filter_scroll_area.setWidgetResizable(True)
+        self.filter_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.filter_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+ 
+        #  Compact filter section height
+        self.filter_scroll_area.setFixedHeight(140)
+ 
+        filter_container = QWidget()
+        filter_container_layout = QVBoxLayout(filter_container)
+        filter_container_layout.setContentsMargins(10, 6, 10, 6)
+        filter_container_layout.setSpacing(6)
+ 
+        #  Top row inside filter section: Search bar (left) + Reset (right)
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(10)
+ 
+        #  Search bar moved DOWN (inside filter section)
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search Comments...")
+        self.search_bar.setStyleSheet("border: 1px solid black; padding: 6px;")
+        self.search_bar.textChanged.connect(self.search_comments)
+        top_row.addWidget(self.search_bar, stretch=1)
+ 
+        # Reset button (small, top-right)
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.setFixedSize(62, 26)
+        self.reset_button.setStyleSheet(
+            "background-color: #FAD7A1; font-size: 10px; font-weight: bold; border-radius: 4px;"
+        )
+        self.reset_button.clicked.connect(self.reset_filters)
+        top_row.addWidget(self.reset_button, alignment=Qt.AlignmentFlag.AlignRight)
+ 
+        filter_container_layout.addLayout(top_row)
+ 
+        # Filter grid (below search+reset row)
+        self.filter_layout = QGridLayout()
+        self.filter_layout.setContentsMargins(0, 0, 0, 0)
+        self.filter_layout.setHorizontalSpacing(8)
+        self.filter_layout.setVerticalSpacing(8)
+        filter_container_layout.addLayout(self.filter_layout)
+ 
+        self.filter_scroll_area.setWidget(filter_container)
+        self.search_layout.addWidget(self.filter_scroll_area)
+ 
+        # -------- TABLE (BELOW FILTERS) --------
+        self.table_view = QTableView()
+        self.table_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.table_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.search_layout.addWidget(self.table_view)
+ 
+        self.tabs.addTab(self.search_tab, "Search")
+ 
+        # ---------------- TAB 2: UPLOAD ----------------
+        self.upload_tab = QWidget()
+        self.upload_layout = QVBoxLayout(self.upload_tab)
+ 
+        self.header_label = QLabel(
+            "Add current month SVP deck and database (Tagetic) to the tool to add comments to the master database."
+        )
+        self.header_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2E86C1; padding: 20px;")
+        self.upload_layout.addWidget(self.header_label)
+ 
+        self.upload_button = QPushButton("Upload file")
+        self.upload_button.setStyleSheet("background-color: #AED6F1; font-size: 14px; height: 30px;")
+        self.upload_button.clicked.connect(self.select_folder)
+        self.upload_layout.addWidget(self.upload_button)
+ 
+        self.master_table_view = QTableView()
+        self.upload_layout.addWidget(self.master_table_view)
+ 
+        button_layout = QHBoxLayout()
+ 
+        push_button = QPushButton("Push to MasterDatabase")
+        push_button.setStyleSheet("background-color: #FAD7A1; font-size: 12px; height: 30px;")
+        push_button.clicked.connect(self.push_to_master_database)
+ 
+        save_button = QPushButton("Download File")
+        save_button.setStyleSheet("background-color: #FAD7A1; font-size: 12px; height: 30px;")
+        save_button.clicked.connect(self.save_changes)
+ 
+        button_layout.addWidget(push_button)
+        button_layout.addWidget(save_button)
+ 
+        self.upload_layout.addLayout(button_layout)
+        self.tabs.addTab(self.upload_tab, "Upload")
+ 
+    # ---------------------- STYLES ----------------------
+    def filter_combo_stylesheet(self):
+        #  White border + checkbox indicator with white border + black theme
+        return """
+        QComboBox {
+            background-color: black;
+            color: white;
+            border: 1px solid white;
+            padding: 5px;
+            min-width: 180px;
+        }
+        QComboBox QLineEdit {
+            background-color: black;
+            color: white;
+            border: none;
+        }
+        QComboBox::drop-down {
+            border: none;
+            width: 26px;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            border-left: 6px solid transparent;
+            border-right: 6px solid transparent;
+            border-top: 8px solid white;
+            margin-right: 6px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: black;
+            color: white;
+            selection-background-color: #2E86C1;
+            selection-color: white;
+            outline: 0;
+        }
+        QAbstractItemView::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid white;
+            background: transparent;
+        }
+        QAbstractItemView::indicator:checked {
+            background: white;
+        }
+        """
+ 
+    # ---------------------- CONFIG ----------------------
+    def resizeEvent(self, event):
+        self.windowWidth = self.frameGeometry().width()
+        self.windowHeight = self.frameGeometry().height()
+        self.saveSettings()
+        super().resizeEvent(event)
+ 
+    def loadDefaults(self):
+        config = ConfigParser()
+        config.read("config.ini")
+ 
+        if "settings" not in config:
+            config.add_section("settings")
+            config["settings"] = {"windowWidth": "1100", "windowHeight": "700"}
+ 
+        self.windowWidth = config["settings"].getint("windowWidth", 1100)
+        self.windowHeight = config["settings"].getint("windowHeight", 700)
+ 
+        with open("config.ini", "w") as f:
+            config.write(f)
+ 
+    def saveSettings(self):
+        config = ConfigParser()
+        config.read("config.ini")
+ 
+        if "settings" not in config:
+            config.add_section("settings")
+ 
+        config["settings"] = {
+            "windowWidth": str(self.windowWidth),
+            "windowHeight": str(self.windowHeight),
+        }
+ 
+        with open("config.ini", "w") as f:
+            config.write(f)
+ 
+    # ---------------------- LOAD / DISPLAY ----------------------
+    def load_data(self):
+        try:
+            if not MASTER_XLSX_PATH.exists():
+                raise FileNotFoundError(
+                    f"Excel file not found:\n{MASTER_XLSX_PATH}\n\n"
+                    f"Expected location: ./database/Segregateddata.xlsx"
+                )
+ 
+            df = pd.read_excel(MASTER_XLSX_PATH)
+ 
+            missing_cols = [c for c in FILTER_COLS if c not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing columns: {', '.join(missing_cols)}")
+ 
+            df[FILTER_COLS] = df[FILTER_COLS].astype(str).fillna("")
+            df["Comments"] = df["Comments"].astype(str).fillna("")
+ 
+            self.df = df
+            self.current_df = df.copy()
+ 
+            #  Default view should show ALL data
+            self.display_data(self.current_df)
+ 
+            #  Build filters with NO selections
+            self.setup_filters(self.df)
+ 
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error loading data:\n{e}")
+ 
+    def display_data(self, df: pd.DataFrame):
+        self.current_df = df.copy()
+ 
+        model = QStandardItemModel(df.shape[0], df.shape[1])
+        model.setHorizontalHeaderLabels(df.columns)
+ 
+        for row in range(df.shape[0]):
+            for col in range(df.shape[1]):
+                model.setItem(row, col, QStandardItem(str(df.iat[row, col])))
+ 
+        self.table_view.setModel(model)
+        self.table_view.resizeColumnsToContents()
+ 
+    # ---------------------- FILTERS (MULTI) ----------------------
+    def setup_filters(self, df: pd.DataFrame):
+        # Clear old filters
+        for i in reversed(range(self.filter_layout.count())):
+            w = self.filter_layout.itemAt(i).widget()
+            if w:
+                w.deleteLater()
+ 
+        self.filter_widgets = {}
+        cols_per_row = 4
+ 
+        for idx, col in enumerate(FILTER_COLS):
+            cb = CheckableComboBox(placeholder=f"{col}")
+ 
+            unique_values = sorted(set(df[col].astype(str).fillna("").tolist()))
+            unique_values = [v for v in unique_values if v.strip() != ""]
+ 
+            cb.addItems(unique_values)
+            cb.setStyleSheet(self.filter_combo_stylesheet())
+ 
+            #  No default selection = show all data
+            # (We do NOT check any items here)
+ 
+            cb.model().dataChanged.connect(self.apply_all_filters)
+ 
+            row = idx // cols_per_row
+            colpos = idx % cols_per_row
+            self.filter_layout.addWidget(cb, row, colpos)
+            self.filter_widgets[col] = cb
+ 
+        for c in range(cols_per_row):
+            self.filter_layout.setColumnStretch(c, 1)
+ 
+    def refresh_filter_options_from_df(self):
+        """Auto-update dropdown unique values when df changes."""
+        if self.df.empty:
+            return
+        for col, cb in self.filter_widgets.items():
+            cb.setItemsKeepChecks(self.df[col].astype(str).fillna("").tolist())
+ 
+    def apply_all_filters(self):
+        if self.df.empty:
+            return
+ 
+        filtered_df = self.df.copy()
+ 
+        # Apply filters only if selection exists
+        for col, cb in self.filter_widgets.items():
+            selected = cb.checkedItems()
+            if selected:
+                filtered_df = filtered_df[filtered_df[col].astype(str).isin(selected)]
+ 
+        # Apply search query
+        query = self.search_bar.text().strip()
+        if query:
+            filtered_df = filtered_df[filtered_df["Comments"].str.contains(query, case=False, na=False)]
+ 
+        self.display_data(filtered_df)
+ 
+    def reset_filters(self):
+        for cb in self.filter_widgets.values():
+            cb.clearChecks()
+            cb.setStyleSheet(self.filter_combo_stylesheet())
+ 
+        self.search_bar.clear()
+ 
+        #  After reset show ALL data
+        self.display_data(self.df)
+ 
+    def search_comments(self, _text=None):
+        self.apply_all_filters()
+ 
+    # ---------------------- DOWNLOAD (FILTERED VIEW) ----------------------
+    def download_data(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Filtered Data",
+            "Filtered_database",
+            "CSV Files (*.csv);;Excel Files (*.xlsx)"
+        )
+        if not file_path:
+            return
+ 
+        try:
+            df_to_save = self.current_df if not self.current_df.empty else self.df
+            if file_path.endswith(".xlsx"):
+                df_to_save.to_excel(file_path, index=False)
+            else:
+                df_to_save.to_csv(file_path, index=False)
+ 
+            QMessageBox.information(self, "Saved", f"Data successfully saved to:\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error saving file:\n{e}")
+ 
+    # ---------------------- UPLOAD TAB ----------------------
+    def select_folder(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select PowerPoint File",
+            "",
+            "PowerPoint Files (*.ppt *.pptx)"
+        )
+        if not file_path:
+            return
+ 
+        if "ppt" not in os.path.basename(file_path).lower():
+            QMessageBox.warning(self, "Invalid Selection", "Please select a file with 'ppt' in its name.")
+            return
+ 
+        self.process_ppt_and_spreadsheet(file_path)
+ 
+    def process_ppt_and_spreadsheet(self, ppt_path):
+        presentation = Presentation(ppt_path)
+        extracted_content = []
+ 
+        for slide_number, slide in enumerate(presentation.slides, start=1):
+            header = None
+ 
+            for shape in slide.shapes:
+                if not shape.has_text_frame:
+                    continue
+ 
+                for paragraph in shape.text_frame.paragraphs:
+                    text = paragraph.text.strip()
+ 
+                    if header is None and text.startswith("G&A Evolution") and text not in ["AMIEO", "M€ @BP25FX"]:
+                        header = text
+ 
+                    extracted_content.append({"Slide Number": slide_number, "Comments": text})
+ 
+            if header:
+                header = header.replace("-", "–")
+                header_parts = header.split(" – ")
+ 
+                category = header_parts[0] if len(header_parts) > 0 else ""
+                month = ""
+                scenario = ""
+                function = ""
+                function_view = ""
+ 
+                month_match = re.search(
+                    r"\b(January|February|March|April|May|June|July|August|September|October|November|December|"
+                    r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b",
+                    header, re.IGNORECASE
+                )
+                if month_match:
+                    month = month_match.group(0)
+ 
+                scenario_match = re.search(r"(MTD|YTD)\s+vs\.\s+[^–]+", header)
+                if scenario_match:
+                    scenario = scenario_match.group(0)
+ 
+                if len(header_parts) > 2:
+                    function = header_parts[2]
+                if len(header_parts) > 3:
+                    function_view = header_parts[3]
+ 
+                current_year = datetime.now().year
+                ppt_file_name = os.path.basename(ppt_path)
+ 
+                for item in extracted_content:
+                    if item["Slide Number"] == slide_number:
+                        item.update({
+                            "File_name": ppt_file_name,
+                            "Category": category,
+                            "Scenarios": scenario,
+                            "Functions": function,
+                            "Functions-View": function_view,
+                            "Month": month,
+                            "Year": current_year,
+                            "Forecast": "",
+                            "Actual": "",
+                            "Variance": ""
+                        })
+ 
+        filtered_content = [i for i in extracted_content if len(i["Comments"]) > 35]
+        extracted_df = pd.DataFrame(filtered_content)
+        regions_and_countries = [
+
+            'Afghanistan', 'Albania', 'Algeria', 'Andorra', 'Angola',
+            'Antigua and Barbuda', 'Argentina', 'Armenia', 'Australia', 'Austria',
+            'Azerbaijan', 'Bahamas', 'Bahrain', 'Bangladesh', 'Barbados',
+            'Belarus', 'Belgium', 'Belize', 'Benin', 'Bhutan',
+            'Bolivia', 'Bosnia and Herzegovina', 'Botswana', 'Brazil', 'Brunei',
+            'Bulgaria', 'Burkina Faso', 'Burundi', 'Cabo Verde', 'Cambodia',
+            'Cameroon', 'Canada', 'Central African Republic', 'Chad', 'Chile',
+            'China', 'Colombia', 'Comoros', 'Congo (Congo-Brazzaville)', 'Costa Rica',
+            'Croatia', 'Cuba', 'Cyprus', 'Czechia (Czech Republic)', 'Democratic Republic of the Congo',
+            'Denmark', 'Djibouti', 'Dominica', 'Dominican Republic', 'Ecuador',
+            'Egypt', 'El Salvador', 'Equatorial Guinea', 'Eritrea', 'Estonia',
+            'Eswatini (fmr. "Swaziland")', 'Ethiopia', 'Fiji', 'Finland', 'France',
+            'Gabon', 'Gambia', 'Georgia', 'Germany', 'Ghana',
+            'Greece', 'Grenada', 'Guatemala', 'Guinea', 'Guinea-Bissau',
+            'Guyana', 'Haiti', 'Holy See', 'Honduras', 'Hungary',
+            'Iceland', 'India', 'Indonesia', 'Iran', 'Iraq',
+            'Ireland', 'Israel', 'Italy', 'Jamaica', 'Japan',
+            'Jordan', 'Kazakhstan', 'Kenya', 'Kiribati', 'Kuwait',
+            'Kyrgyzstan', 'Laos', 'Latvia', 'Lebanon', 'Lesotho',
+            'Liberia', 'Libya', 'Liechtenstein', 'Lithuania', 'Luxembourg',
+            'Madagascar', 'Malawi', 'Malaysia', 'Maldives', 'Mali',
+            'Malta', 'Marshall Islands', 'Mauritania', 'Mauritius', 'Mexico',
+            'Micronesia', 'Moldova', 'Monaco', 'Mongolia', 'Montenegro',
+            'Morocco', 'Mozambique', 'Myanmar', 'Namibia', 'Nauru',
+            'Nepal', 'Netherlands', 'New Zealand', 'Nicaragua', 'Niger',
+            'Nigeria', 'North Korea', 'North Macedonia', 'Norway', 'Oman',
+            'Pakistan', 'Palau', 'Palestine State', 'Panama', 'Papua New Guinea',
+            'Paraguay', 'Peru', 'Philippines', 'Poland', 'Portugal',
+            'Qatar', 'Romania', 'Russia', 'Rwanda', 'Saint Kitts and Nevis',
+            'Saint Lucia', 'Saint Vincent and the Grenadines', 'Samoa', 'San Marino', 'Sao Tome and Principe',
+            'Saudi Arabia', 'Senegal', 'Serbia', 'Seychelles', 'Sierra Leone',
+            'Singapore', 'Slovakia', 'Slovenia', 'Solomon Islands', 'Somalia','France'
+            'South Africa', 'South Korea', 'South Sudan', 'Spain', 'Sri Lanka',
+            'Sudan', 'Suriname', 'Sweden', 'Switzerland', 'Syria',
+            'Tajikistan', 'Tanzania', 'Thailand', 'Timor-Leste', 'Togo',
+            'Tonga', 'Trinidad and Tobago', 'Tunisia', 'Turkey', 'Turkmenistan',
+            'Tuvalu', 'Uganda', 'Ukraine', 'United Arab Emirates', 'United Kingdom',
+            'United States of America', 'Uruguay', 'Uzbekistan', 'Vanuatu', 'Venezuela',
+            'Vietnam', 'Yemen', 'Zambia', 'Zimbabwe','AMIO','AMIEO','Middle East','Europe','Oceania','ME','Africa'
+        ]
+
+        lc_oh = ['LC', 'OH', 'Notes', 'OVH']
+        keyword_1 = ["A&F SVP OFFICE", "Milky Way", "CUSTOMS", "Finance Project portfolio", "FINANCE & ACCOUNTING", "FPLAN & VP FINANCE", "NRBS FINANCE", "NRBS MD Office", "NRBS TAX", "PEC", "S&M CONTROLLING FIN", "SSC", "TAX", "TREASURY", "R&D Finance & Accounting", "IS", "NRBSISIT", "CENTRAL TASKS", "CEC", "GLOBAL ROLES", "QEX", "NON EUROPE & EXEC", "CPLO SVP Office", "General Affairs", "NRBSGA", "Regional General Affairs", "Local HR", "Regional COE & HRBP", "NRBS HR", "Local Health & Safety", "Regional Health & Safety", "REGIONAL SECURITY", "LOCAL SECURITY", "Business Transformation and Acceleration", "Corporate projects", "STRATEGIC PLANNING", "INT AUDIT & JSOX", "MC-E CHAIRMAN OFFICE", "ELECTRIFICATION", "OPD", "MZK SVP Office", "Central SCM", "NRBS Purchasing", "PURCHASING", "AS Import & Service repairs", "AFTER SALES OPS", "REGION - AFTER SALES", "Service Marketing", "Brand & Customer Experience", "Customer Exp 2.0", "MARCOM", "CONNECTED SERVICES", "MARKET INTELLIGENCE", "RBU - MARKETING", "Business Development Europe", "DX for CX", "FULL LIFE CYCLE", "REGION - Energy Services", "Transformation", "PRODUCT STRATEGY & PLANNING", "RBU - DND & CQ", "RBU - SALES", "RBU - AFTER SALES", "RBU - ENERGY AND BATTERY", "RBU MD office", "Product & Service Planning", "REGION - DND", "DVP OFFICE", "REGION - INSC", "MARKETING OPS", "SALES OPS", "LCV", "NANO", "Planning & Performance", "M&S - SVP OFFICE", "COMMUNICATION", "COMPLIANCE", "EGA (External & Governmental Affairs)", "LEGAL", "SCAG_SVP Office", "Sustainability & Governance", "TCS", "TCS AVES"]
+        criteria = ["PROCURED SERVICES","TRAVEL & MEALS","EMPLOYEE WELFARE","RECHARGE NISSAN Level0","OPERATING COSTS","OFFICE SPACE","EMPLOYEE ACTIVITY COSTS","TAX","RECHARGE OUTSIDE","PROVISION FOR DOUBTFUL DEBTS","COMPANY CAR COSTS","DEPRECIATION"]
+        entity = ["Nissan Automotive Europe","NIBSA","NMISA","NMUK - PLANT","Nissan Motor Parts Center","NWE - Belgium branch","NCE Germany","NCE - Swiss branch","NCE - Austria branch","NITA","NWE - Netherlands branch","NMGB","NNE","NNE - Denmark branch","NNE - Sweden branch","NNE - Norway branch","Nissan Automobiles Turkey (NOAS)","NM Ukraine Nissan/Datsun","NSCEE - Hungarian branch","NSCEE - Czech branch","NSCEE - Polish branch","NMUK - NTCE","Nissan France","Nissan International SA","NTCE Germany Branch","NTCE Belgium Branch","Adjustment entity","NMPC - UK Lutterworth","NMUK","NAE","NRBS","NTCE","NRBS","NMEF"]
+
+        def extract_region_country(text):
+            if pd.isna(text):  
+                return ''  # Return an empty string or any default value
+            text_lower = text.lower()
+            extracted = [item for item in regions_and_countries if re.search(r'\b' + re.escape(item.lower()) + r'\b', text_lower)]
+            return ', '.join(extracted)
+        def lc_oh_1(text):
+            if pd.isna(text):  
+                return ''  
+            text_lower = text.lower()
+            extracted = [item for item in lc_oh if re.search(r'\b' + re.escape(item.lower()) + r'\b', text_lower)]
+            return ', '.join(extracted)    
+
+        # Function to extract criteria
+        def extract_criteria(text):
+            if pd.isna(text):  # Check if the text is NaN
+                return ''  # Return an empty string or any default value
+            text_lower = text.lower()
+            extracted = [item for item in criteria if re.search(r'\b' + re.escape(item.lower()) + r'\b', text_lower)]
+            return ', '.join(extracted)
+
+        def keyword(text):
+            if pd.isna(text):  
+                return ''  
+            text_lower = text.lower()
+            extracted = [item for item in keyword_1 if re.search(r'\b' + re.escape(item.lower()) + r'\b', text_lower)]
+            return ', '.join(extracted)
+
+ 
+        def extract_entity(text):
+            if pd.isna(text):  
+                return ''  
+            text_lower = text.lower()
+            extracted = [item for item in entity if re.search(r'\b' + re.escape(item.lower()) + r'\b', text_lower)]
+            return ', '.join(extracted)
+
+
+        extracted_df['CostCat description'] = extracted_df['Comments'].apply(extract_criteria)
+        extracted_df['Function_desc'] = extracted_df['Comments'].apply(keyword)
+        extracted_df['Entity_desc'] = extracted_df['Comments'].apply(extract_entity)
+        extracted_df['Criteria']=extracted_df['Comments'].apply(lc_oh_1)
+        extracted_df['Region']=extracted_df['Comments'].apply(extract_region_country)
+        self.load_master_data(extracted_df)
+ 
+    def load_master_data(self, df):
+        model = QStandardItemModel(df.shape[0], df.shape[1])
+        model.setHorizontalHeaderLabels(df.columns)
+ 
+        for r in range(df.shape[0]):
+            for c in range(df.shape[1]):
+                model.setItem(r, c, QStandardItem(str(df.iat[r, c])))
+ 
+        self.master_table_view.setModel(model)
+        self.master_table_view.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
+ 
+    def push_to_master_database(self):
+        model = self.master_table_view.model()
+        if model is None:
+            QMessageBox.warning(self, "No Data", "No data to push.")
+            return
+ 
+        rows = model.rowCount()
+        cols = model.columnCount()
+ 
+        data = []
+        for r in range(rows):
+            row_data = []
+            for c in range(cols):
+                item = model.item(r, c)
+                row_data.append("" if item is None else item.text())
+            data.append(row_data)
+ 
+        df_new = pd.DataFrame(data, columns=[model.horizontalHeaderItem(i).text() for i in range(cols)])
+ 
+        if MASTER_XLSX_PATH.exists():
+            master_df = pd.read_excel(MASTER_XLSX_PATH)
+        else:
+            master_df = pd.DataFrame()
+ 
+        combined = pd.concat([master_df, df_new], ignore_index=True) if not master_df.empty else df_new
+ 
+        if "Slide Number" in combined.columns and "Comments" in combined.columns:
+            combined = combined.drop_duplicates(subset=["Slide Number", "Comments"], keep="last").reset_index(drop=True)
+ 
+        # Ensure database folder exists
+        MASTER_XLSX_PATH.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_excel(MASTER_XLSX_PATH, index=False)
+ 
+        QMessageBox.information(self, "Saved", f"Data successfully pushed to:\n{MASTER_XLSX_PATH}")
+ 
+        # Reload + refresh filters
+        self.load_data()
+        self.refresh_filter_options_from_df()
+ 
+    def save_changes(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save File",
+            "Commentry_edited",
+            "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if not file_path:
+            return
+ 
+        model = self.master_table_view.model()
+        if model is None:
+            QMessageBox.warning(self, "No Data", "No data to save.")
+            return
+ 
+        rows = model.rowCount()
+        cols = model.columnCount()
+ 
+        data = []
+        for r in range(rows):
+            row_data = []
+            for c in range(cols):
+                item = model.item(r, c)
+                row_data.append("" if item is None else item.text())
+            data.append(row_data)
+ 
+        df = pd.DataFrame(data, columns=[model.horizontalHeaderItem(i).text() for i in range(cols)])
+        df.to_excel(file_path, index=False)
+        QMessageBox.information(self, "Saved", f"Data saved to:\n{file_path}")
+ 
+ 
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = DataExplorer()
+    window.load_data()
+    window.show()
+    sys.exit(app.exec())
+ 
