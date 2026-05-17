@@ -1,0 +1,258 @@
+"""
+CSV / Excel Database Agent with Conversation Memory
+"""
+
+import os
+import sys
+import argparse
+from pathlib import Path
+from collections import deque
+
+import pandas as pd
+from dotenv import load_dotenv
+
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_openai import AzureChatOpenAI
+from langchain_experimental.agents import create_pandas_dataframe_agent
+from pathlib import Path
+
+load_dotenv(override=True)
+
+azure_endpoint    = os.getenv("AZURE_OPENAI_ENDPOINT")
+azure_api_key     = os.getenv("AZURE_OPENAI_API_KEY")
+azure_deployment  = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+
+_missing = [k for k, v in {
+    "AZURE_OPENAI_ENDPOINT":    azure_endpoint,
+    "AZURE_OPENAI_API_KEY":     azure_api_key,
+    "AZURE_OPENAI_DEPLOYMENT":  azure_deployment,
+    "AZURE_OPENAI_API_VERSION": azure_api_version,
+}.items() if not v]
+
+if _missing:
+    sys.exit(f"[ERROR] Missing env vars: {', '.join(_missing)}")
+
+def build_llm() -> AzureChatOpenAI:
+    return AzureChatOpenAI(
+        azure_endpoint=azure_endpoint,
+        api_key=azure_api_key,
+        azure_deployment=azure_deployment,
+        api_version=azure_api_version,
+        temperature=0,
+    )
+
+SUPPORTED = {".csv", ".xlsx", ".xls", ".tsv"}
+
+def load_file(file_path: str, sheet_name: str | None = None):
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    ext = path.suffix.lower()
+    if ext not in SUPPORTED:
+        raise ValueError(f"Unsupported extension '{ext}'. Supported: {sorted(SUPPORTED)}")
+
+    if ext == ".csv":
+        df = pd.read_csv(file_path)
+    elif ext == ".tsv":
+        df = pd.read_csv(file_path, sep="\t")
+    else:
+        xl = pd.ExcelFile(file_path)
+        sheets = xl.sheet_names
+        if sheet_name:
+            df = xl.parse(sheet_name)
+        elif len(sheets) == 1:
+            df = xl.parse(sheets[0])
+        else:
+            print(f"[INFO] Sheets: {sheets}")
+            chosen = input("Enter sheet name (or Enter for ALL): ").strip()
+            if chosen:
+                df = xl.parse(chosen)
+            else:
+                dfs = [xl.parse(s) for s in sheets]
+                print(f"[INFO] Loaded {len(dfs)} sheets.")
+                return dfs
+
+    print(f"[INFO] Loaded '{path.name}'  ->  {df.shape[0]:,} rows x {df.shape[1]} columns")
+    return df
+
+def build_system_prompt() -> str:
+    return """You are a data analyst assistant. The dataset is loaded into a pandas DataFrame called `df`.
+
+HOW TO ANSWER:
+
+A. QUERY THE DATAFRAME (default):
+   For questions about data, aggregations, filters, trends, or comparisons where
+   both values come from `df` — write and run the correct pandas code.
+
+B. USER PROVIDES A LITERAL NUMBER:
+   If the user states an explicit number in their message (e.g. "actual is 456896556"),
+   treat it as given — do NOT re-query `df` for it.
+   Use the prior answer from conversation history as the base value.
+   Show: absolute difference AND % change, with the two numbers used.
+
+C. FOLLOW-UP WITHOUT A NUMBER:
+   If the user asks a follow-up without stating a number, query `df` normally.
+
+ALWAYS:
+- Check `df.columns` and `df[col].unique()` before filtering to use exact column names AND exact values.
+- Special characters in values (e.g. +, /, -, spaces) must match exactly as they appear in the data.
+- For comparison questions, query each value separately then compute difference and % change.
+- Lead with the result, then show the working.
+- Format large numbers with commas (e.g. 1,234,567).
+- State any assumptions if the question is ambiguous.
+- Output plain text only — no LaTeX, no markdown math (no [ ], fractions, or math notation), no asterisks for bold.
+- Show calculations as simple plain text: e.g.  386,929,148 - 385,748,395 = 1,180,753"""
+
+
+
+# def build_system_prompt() -> str:
+#     prompt_path = Path("./prompts/system_prompt.md")
+
+#     if not prompt_path.exists():
+#         raise FileNotFoundError("system_prompt.md not found")
+
+#     return prompt_path.read_text(encoding="utf-8")
+_chat_history: dict[str, deque] = {}
+
+def get_history(session_id: str, max_turns: int = 10) -> list:
+    if session_id not in _chat_history:
+        _chat_history[session_id] = deque(maxlen=max_turns * 2)
+    return list(_chat_history[session_id])
+
+def save_turn(session_id: str, question: str, answer: str, max_turns: int = 10):
+    if session_id not in _chat_history:
+        _chat_history[session_id] = deque(maxlen=max_turns * 2)
+    _chat_history[session_id].append(HumanMessage(content=question))
+    _chat_history[session_id].append(AIMessage(content=answer))
+
+def clear_history(session_id: str):
+    if session_id in _chat_history:
+        _chat_history[session_id].clear()
+
+def build_agent(df, verbose: bool = True):
+    agent = create_pandas_dataframe_agent(
+        llm=build_llm(),
+        df=df,
+        agent_type="tool-calling",
+        verbose=verbose,
+        allow_dangerous_code=True,
+        number_of_head_rows=10,
+        include_df_in_prompt=True,
+        max_iterations=20,
+        prefix=build_system_prompt(),
+    )
+    return agent
+
+def _build_input(question: str, session_id: str, max_turns: int) -> str:
+    history = get_history(session_id, max_turns)
+    if not history:
+        return question
+    history_text = "\n".join([
+        f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content}"
+        for m in history
+    ])
+    return f"Conversation so far:\n{history_text}\n\nCurrent question: {question}"
+
+def ask(agent, question: str, session_id: str = "default", max_turns: int = 10) -> str:
+    full_input = _build_input(question, session_id, max_turns)
+    result = agent.invoke({"input": full_input})
+    answer = result.get("output", str(result))
+    save_turn(session_id, question, answer, max_turns)
+    return answer
+
+
+
+def print_summary(df) -> None:
+    dfs = df if isinstance(df, list) else [df]
+    for i, d in enumerate(dfs, 1):
+        if len(dfs) > 1:
+            print(f"\n-- Sheet {i} --")
+        print(f"  Shape   : {d.shape[0]:,} rows x {d.shape[1]} columns")
+        print(f"  Columns : {list(d.columns)}")
+        missing = d.isnull().sum()
+        if missing.any():
+            print(f"  Missing : {missing[missing > 0].to_dict()}")
+        print(f"  Dtypes  :\n{d.dtypes.to_string()}")
+
+SESSION_ID = "main"
+
+EXAMPLES = [
+    "How many rows and columns does this dataset have?",
+    "Show summary statistics for all numeric columns.",
+    "Which column has the most missing values?",
+    "Show the top 5 rows.",
+    "Are there any duplicate rows?",
+    "Show correlation between numeric columns.",
+    "What is the value count of the first categorical column?",
+]
+
+def run_repl(agent, max_turns: int) -> None:
+    print("\n" + "=" * 55)
+    print("  Agent ready  —  memory ON  |  'history' 'clear' 'exit'")
+    print("=" * 55)
+    for q in EXAMPLES:
+        print(f"  * {q}")
+    print()
+
+    while True:
+        try:
+            question = input("You: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nGoodbye!")
+            break
+
+        if not question:
+            continue
+        if question.lower() in {"exit", "quit", "q"}:
+            print("Goodbye!")
+            break
+        if question.lower() == "history":
+            msgs = get_history(SESSION_ID, max_turns)
+            if not msgs:
+                print("[Memory is empty]\n")
+            else:
+                print("\n-- Conversation History --")
+                for m in msgs:
+                    role = "You  " if isinstance(m, HumanMessage) else "Agent"
+                    print(f"  {role}: {m.content}")
+                print()
+            continue
+        if question.lower() == "clear":
+            clear_history(SESSION_ID)
+            print("[Memory cleared]\n")
+            continue
+
+        try:
+            answer = ask(agent, question, session_id=SESSION_ID, max_turns=max_turns)
+            print(f"\nAgent: {answer}\n")
+        except Exception as exc:
+            print(f"[ERROR] {exc}\n")
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CSV/Excel Agent — Azure GPT-4o Mini")
+    parser.add_argument("--file",        type=str)
+    parser.add_argument("--sheet",       type=str, default=None)
+    parser.add_argument("--quiet",       action="store_true")
+    parser.add_argument("--memory-size", type=int, default=10)
+    args = parser.parse_args()
+
+    file_path = args.file or input("Enter path to CSV or Excel file: ").strip()
+
+    try:
+        df = load_file(file_path, sheet_name=args.sheet)
+    except (FileNotFoundError, ValueError) as exc:
+        sys.exit(f"[ERROR] {exc}")
+
+    print("\n" + "=" * 55)
+    print("DATASET OVERVIEW")
+    print("=" * 55)
+    print_summary(df)
+    print("=" * 55)
+
+    print(f"\n[INFO] Initialising agent  (memory: last {args.memory_size} turns)...")
+    agent = build_agent(df, verbose=not args.quiet)
+    run_repl(agent, args.memory_size)
+
+if __name__ == "__main__":
+    main()
