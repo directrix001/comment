@@ -1,0 +1,493 @@
+import pandas as pd
+import openpyxl
+import re
+from datetime import datetime
+import numpy as np
+import calendar
+import os
+
+from Nissan_Helper_act_function import (
+    find_row_numbers_act,
+    find_values_pandas_HFM,
+    SearchResults,
+    generate_excel_formula,
+    extract_formula,
+    paste_values_KPI_PL,
+    relief_search_terms_new,
+    find_row_and_column,
+    find_row_number_CMFI,
+    generate_excel_formula_1,
+    find_itp_and_month_value,
+    find_second_column_for_outside_profit,
+    generate_excel_formula_2,
+    goodwill_raw_data_extraction,
+    Goodwill_rows,
+    paste_values_goodwill
+    # result
+
+)
+
+from utils.logger import logger
+
+logger.info("ACT triggered")
+
+def ACT(file_path_P_L,file_path_P_L_1,df_P_L_ROP_NE,df_P_L_HQ, file_path_OSP,df_OSP, file_path_HMF,df_HMF_Managerial, file_path_New_KPI,df_P_L_New_KPI,file_HQ_Item,df_hQ_items,file_goodwill, df_r_and_d,
+        df_MZ_conso,
+        df_P_L_Relief,
+        df_P_L_PL,
+        df_P_L_Reclass,
+        df_P_L_MCCP,
+        df_P_L_OCS,  df_New_KPI_CFMI,
+        df_New_goodwill,df_Act,df_1c_osp,file_paths_High_Level_Variance,
+        df_high_variance_feuil,
+        file_paths_Relief_KD,
+        df_Relief_KD,
+        file_paths_Purchase_Price,
+        df_Purchase_Price,
+        file_paths_UP_Calc_Template_Simulation,
+        df_UP_Calc_Template_Simulation,
+        file_paths_NANO_HFM,
+        df_nano_hfm,
+        file_paths_ITP,
+        df_itp,file_path_Template, file_path_Template_1,month_number, Var_Converter,var_Cfmi,file_path_Template_man_1,file_path_goodwill_template,result,output_path):
+    print("processing File2!")    
+    
+    current_year = datetime.now().year
+    current_date = datetime.now()
+
+    if current_date.month >= 4:  # If the current month is April or later
+        financial_year_start = current_date.year
+        financial_year_end = current_date.year + 1
+    else:  # If the current month is before April
+        financial_year_start = current_date.year - 1
+        financial_year_end = current_date.year
+
+    current_year = f"{financial_year_start}-{str(financial_year_end)[-2:]}"
+    def find_columns_with_months(df, month_number):
+        # Iterate over each row in the DataFrame
+        for index, row in df.iterrows():
+            # Iterate over each value in the row
+            for column_name, value in row.items():
+                # Check if the value matches 'apr'
+                if str(value).lower() == 'apr':
+                    # Find the column index of 'apr'
+                    column_index_apr = df.columns.get_loc(column_name)
+                    # Calculate the adjusted column index using the formula
+                    adjusted_month_index_2 = (month_number - 4) % 12
+                    column_index_P_L_Relief = column_index_apr + adjusted_month_index_2
+                    return column_index_P_L_Relief
+
+        # Return None if 'apr' is not found
+        return None
+
+    def find_columns_with_month_r_and_d(df, month_number):
+        # Iterate over each row in the DataFrame
+        for index, row in df.iterrows():
+            # Iterate over each value in the row
+            for column_name, value in row.items():
+                # Check if the value matches 'april'
+                if str(value).lower() == 'april':
+                    # Find the column index of 'april'
+                    column_index_april = df.columns.get_loc(column_name)
+                    # Calculate the adjusted column index using the formula
+                    adjusted_month_index_2 = (month_number - 4) % 12
+                    column_index_P_L_Relief = column_index_april + adjusted_month_index_2
+                    return column_index_P_L_Relief
+
+        # Return None if 'april' is not found
+        return None
+
+
+
+    # def find_columns_with_months(df, month_number):
+    #     month_names = {
+    #         1: 'jan', 2: 'feb', 3: 'mar', 4: 'apr',
+    #         5: 'may', 6: 'jun', 7: 'jul', 8: 'aug',
+    #         9: 'sep', 10: 'oct', 11: 'nov', 12: 'dec'
+    #     }
+
+    #     month_name = month_names.get(month_number)
+
+    #     if not month_name:
+    #         raise ValueError("Invalid month number. Please provide a number between 1 and 12.")
+
+
+
+    #     columns_with_month = set()
+
+    #     for column in df.columns:
+    #         if df[column].astype(str).str.lower().str.contains(month_name).any():
+    #             columns_with_month.add(column)
+
+    #     return sorted(columns_with_month)
+    # def find_columns_with_month_r_and_d(df, month_number):
+    #     month_number_1=4
+    #     month_names = {
+    #         1: 'january', 2: 'february', 3: 'march', 4: 'april',
+    #         5: 'may', 6: 'june', 7: 'july', 8: 'august',
+    #         9: 'september', 10: 'october', 11: 'november', 12: 'december'
+    #     }											
+
+    #     month_name = month_names.get(month_number_1)
+
+    #     if not month_name:
+    #         raise ValueError("Invalid month number. Please provide a number between 1 and 12.")
+
+
+
+    #     columns_with_month = set()
+
+    #     for column in df.columns:
+    #         if df[column].astype(str).str.lower().str.contains(month_name).any():
+    #             columns_with_month.add(column)
+
+    #     return sorted(columns_with_month)    
+
+
+    def get_cell_value_and_formulas(df, row, column):
+        if isinstance(column, str):
+            try:
+                column = int(column)
+            except ValueError:
+                raise ValueError("Column index must be an integer.")
+        return df.iloc[row, column]
+
+    def get_value_or_zero(value):
+        return 0 if np.isnan(value) else value
+
+    # adjusted_month_index_2 = (month_number - 4) % 12
+    column_index_P_L_Relief =find_columns_with_months(df_P_L_Relief, month_number)
+    column_index_New_HFM = find_columns_with_months(df_HMF_Managerial, month_number)
+    act_col_adj = find_columns_with_months(df_Act, month_number)
+    # print(columns_with_month_1)
+    # numeric_suffixes = [int(name.split(': ')[1]) for name in columns_with_month_1]
+    # smallest_suffix_index = numeric_suffixes.index(min(numeric_suffixes))
+    # smallest_column_name = columns_with_month_1[smallest_suffix_index]
+    # print(f"Smallest column name: {smallest_column_name}")
+    # column_index_New_HFM = df_HMF_Managerial.columns.get_loc(smallest_column_name)
+    # print(f"Index of the column with the smallest numeric suffix: {column_index_New_HFM}")
+
+
+    column_index_New_KPI = find_columns_with_months(df_P_L_New_KPI, month_number)
+    # print(columns_with_month_1)
+    # numeric_suffixes = [int(name.split(': ')[1]) for name in columns_with_month_1]
+    # smallest_suffix_index = numeric_suffixes.index(min(numeric_suffixes))
+    # smallest_column_name = columns_with_month_1[smallest_suffix_index]
+    # print(f"Smallest column name: {smallest_column_name}")
+    # column_index_New_KPI = df_P_L_New_KPI.columns.get_loc(smallest_column_name)
+    # print(f"Index of the column with the smallest numeric suffix: {column_index_New_HFM}")
+    
+    column_index_ACT = find_columns_with_months(df_Act, month_number)
+    # print(columns_with_month_1)
+    # numeric_suffixes = [int(name.split(': ')[1]) for name in columns_with_month_1]
+    # smallest_suffix_index = numeric_suffixes.index(min(numeric_suffixes))
+    # smallest_column_name = columns_with_month_1[smallest_suffix_index]
+    # print(f"Smallest column name: {smallest_column_name}")
+    # column_index_ACT = df_Act.columns.get_loc(smallest_column_name)
+    # print(f"Index of the column with the smallest numeric suffix: {column_index_New_HFM}")
+
+    column_index_New_P_L = find_columns_with_months(df_P_L_PL, month_number)
+    # print(columns_with_month_1)
+    # numeric_suffixes = [int(name.split(': ')[1]) for name in columns_with_month_1]
+    # smallest_suffix_index = numeric_suffixes.index(min(numeric_suffixes))
+    # smallest_column_name = columns_with_month_1[smallest_suffix_index]
+    # print(f"Smallest column name: {smallest_column_name}")
+    # column_index_New_P_L = df_P_L_PL.columns.get_loc(smallest_column_name)
+    # print(f"Index of the column with the smallest numeric suffix: {column_index_New_P_L}")
+
+    row_OSP, colmunm_OSP = find_itp_and_month_value(df_OSP, month_number)
+    row_OSP_1, colmunm_OSP_1 = find_second_column_for_outside_profit(df_OSP, month_number)
+    sheet_name_osp='Master'
+    formula_act_osp = generate_excel_formula_1(row_OSP, colmunm_OSP, sheet_name_osp,file_path_OSP)
+    formula_act_osp_1 = generate_excel_formula_1(row_OSP_1, colmunm_OSP_1, sheet_name_osp,file_path_OSP)
+    formula_act_osp_1=f"=-{formula_act_osp_1[1:]}"
+    formula_act_osp_sum=f"=-(IFERROR({formula_act_osp[1:]},0))" 
+
+    find_values_pandas_HFM(df_HMF_Managerial)
+    sheet_name_pl='P&L Actual'
+    df_HMF_Managerial=pd.read_excel(file_path_HMF,sheet_name='Managerial')
+
+
+    sheet_name_new='New KPI Actual'
+    sheet_name_man='Managerial'
+    formula_act_1 = generate_excel_formula_1(34, column_index_New_KPI, sheet_name_new,result)
+    formula_act_2 = generate_excel_formula(SearchResults.wholesale_volume, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_3 = generate_excel_formula(SearchResults.gross_sales_wo_rd, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_4 = generate_excel_formula(SearchResults.rd_revenues, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_5 = generate_excel_formula(SearchResults.ci, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_6 = generate_excel_formula(SearchResults.mfg_fixed_plants, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_7 = generate_excel_formula(SearchResults.vendor_tooling, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_8 = generate_excel_formula(SearchResults.rd_costs, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_9 = generate_excel_formula(SearchResults.mfg_fixed_out_of_scope, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_10 = generate_excel_formula(SearchResults.fmi, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_11 = generate_excel_formula(SearchResults.ga_and_other_items, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_12 = generate_excel_formula(SearchResults.sga_total+1, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_act_13 = generate_excel_formula(SearchResults.warranty_rs, column_index_New_HFM, sheet_name_man,file_path_HMF)
+    formula_sum_act_1=f"={formula_act_3[1:]}+{formula_act_4[1:]}"
+    sheet_name_act = 'Act'
+    Formula_ex_act_1=extract_formula(file_path_Template_man_1, sheet_name_act, 30, act_col_adj)  
+    formula_sum_act_2=f"={formula_act_1[1:]}-{Formula_ex_act_1[1:]}"
+    Formula_ex_act_d17=extract_formula(file_path_Template_man_1, sheet_name_act, 16, act_col_adj)  
+    formula_sum_act_3=f"={formula_act_13[1:]}-{Formula_ex_act_d17[1:]}"
+
+    
+
+    # adjusted_month_index_1 = (month_number - 4) % 12
+    # col_adj=2+adjusted_month_index_1#giving column adress to goodwill file
+    adjusted_month_index_1 = (month_number - 4) % 12
+    col_adj_goodwill=2+adjusted_month_index_1#giving column adress to goodwill file       
+
+    # sheet_name="Sheet1"
+    sheet_name_gew = "GW Budget"
+    # row, col = find_row_and_column(df_New_goodwill, month_number)
+    month_name = calendar.month_name[month_number]
+    # file_path_goodwill_gen=os.path.join(os.getcwd(), 'Goodwill_files', f'Goodwill_{month_name}_output_FY{current_year}.xlsx')
+    file_path_goodwill_gen=output_path+"\\"+f'Goodwill_{month_name}_output_FY{current_year}.xlsx'
+    # formula_act_godwill = generate_excel_formula(16, col_adj_goodwill, sheet_name_gew,file_path_goodwill_template)
+    # formula_act_pl_19 = generate_excel_formula_1(102, column_index_New_P_L, sheet_name_pl,result)
+    # Formula_ex_act_17=extract_formula(file_path_Template_man_1, sheet_name_act, 209, act_col_adj) 
+    # if month_number==4 or month_number==5 :
+    #     formula_sum_act_10=f"={formula_act_pl_19[1:]}-{Formula_ex_act_17[1:]}" 
+    # else:
+    #     formula_sum_act_10=f"={formula_act_pl_19[1:]}-{formula_act_godwill[1:]}-{Formula_ex_act_17[1:]}"  
+
+    formula_sum_act_10= generate_excel_formula(21, col_adj_goodwill, sheet_name_gew,file_path_goodwill_gen)   
+
+
+
+
+
+    
+    search_terms = ["goodwill", "ghq (cfmi)", "nmgb buyback - scope change to hq", "ger tcs", "act", "mobility"]
+    column_indices, goodwill_rows, ghq_cfmi_rows, nmgb_buyback_rows, ger_tcs_rows, act_rows, mobility_rows = goodwill_raw_data_extraction(df_New_goodwill, month_number, search_terms)
+
+    # print("Rows with 'Goodwill':", instance.goodwill_rows)
+    # print("Rows with 'GHQ (CFMI)':", instance.ghq_cfmi_rows)
+    # print("Rows with 'NMGB Buyback - Scope change to HQ':", instance.nmgb_buyback_rows)
+    # print("Rows with 'GER TCS':",instance.ger_tcs_rows)
+    # print("Rows with 'ACT':", instance.act_rows)
+    # print("Rows with 'Mobility':", instance.mobility_rows)
+
+    f1 = generate_excel_formula_1(goodwill_rows[0]+2, col_adj_goodwill, sheet_name_gew, file_goodwill)
+    f2 = generate_excel_formula_1(ghq_cfmi_rows[0]+2, col_adj_goodwill, sheet_name_gew, file_goodwill)
+    f3 = generate_excel_formula_1(nmgb_buyback_rows[0]+2, col_adj_goodwill, sheet_name_gew, file_goodwill)
+    f4 = generate_excel_formula_1(ger_tcs_rows[0]+2, col_adj_goodwill, sheet_name_gew, file_goodwill)
+    f5 = generate_excel_formula_1(act_rows[0]+2, col_adj_goodwill, sheet_name_gew, file_goodwill)
+    f6 = generate_excel_formula_1(mobility_rows[0]+2, col_adj_goodwill, sheet_name_gew, file_goodwill)
+    
+    print(f1)
+
+
+
+
+    relief_search_terms_row = relief_search_terms_new(df_P_L_Relief)
+    recall_service_campaigns_row1=relief_search_terms_row.get("recall service/campaigns")
+    kd_itp_nmuk_row1=relief_search_terms_row.get("kd itp (nmuk)")
+    kd_itp_nmisa_row2=relief_search_terms_row.get("kd itp (nmisa)")
+    kd_itp_nmgr_row2=relief_search_terms_row.get("kd itp (nmgr)")
+    connectivity_row2=relief_search_terms_row.get( "connectivity")
+    itp_cbu_nissan_row2=relief_search_terms_row.get("itp cbu nissan")
+    itp_cbu_infiniti_row2=relief_search_terms_row.get("itp cbu infiniti")
+    iln_export_nmuk_row2=relief_search_terms_row.get( "iln export (nmuk)")
+    iln_export_nmisa_row2=relief_search_terms_row.get("iln export (nmisa)")
+    error_correction_in_mz_row2=relief_search_terms_row.get("error correction in mz (?)")
+    export=relief_search_terms_row.get("export")
+    mz_impairment_row2=relief_search_terms_row.get("mz impairment")
+    g_a_impairment_row2=relief_search_terms_row.get( "g&a impairment")
+    compact_ev_vt_impairment=relief_search_terms_row.get("compact ev/vt impairment")       
+    battery_kw_itp_nmuk=relief_search_terms_row.get("battery 40 kw itp ( nmuk )")
+    battery_kw_itp_nmisa=relief_search_terms_row.get("battery 40 kw itp ( nmisa )")
+    battery_cancelation_row=relief_search_terms_row.get("battery cancelation")
+    error_correction_in_mz_row=relief_search_terms_row.get("error correction in mz (after wd5)")
+    top_daimler_correction_row=relief_search_terms_row.get("top daimler correction (after wd5)")        
+    infiniti_fmi_correction_row=relief_search_terms_row.get("infiniti fmi correction (after wd5)")
+    itp_cbu_nissan_row=relief_search_terms_row.get("itp cbu nissan")
+    itp_cbu_infiniti_row=relief_search_terms_row.get("itp cbu infiniti")
+    connectivity_row=relief_search_terms_row.get("connectivity")
+
+    row_numbers_CFMI = find_row_number_CMFI(df_New_KPI_CFMI)
+    column_index_CFMI = find_columns_with_months(df_New_KPI_CFMI, month_number)
+    # column_name = columns_with_month_1[0]
+    # column_index_CFMI = df_New_KPI_CFMI.columns.get_loc(column_name)
+    sheet_name_cfmi='CFMI'
+    formula_act_cfmi = generate_excel_formula(row_numbers_CFMI[0], column_index_CFMI, sheet_name_cfmi)
+    
+
+
+
+ 
+    # columns_with_month_1 = find_columns_with_months(df_P_L_Relief, month_number)
+    # print("jijijij",columns_with_month_1)
+    # column_name = columns_with_month_1[2]
+    # column_index_P_L_Relief = df_P_L_Relief.columns.get_loc(column_name)
+
+
+
+    sheet_name_rel="Relief"
+    formula_relief_1=generate_excel_formula(recall_service_campaigns_row1, column_index_P_L_Relief, sheet_name_rel,result)
+
+    formula_act_new_2 = generate_excel_formula_1(282, column_index_New_KPI, sheet_name_new,result)
+    Formula_ex_new_2=extract_formula(file_path_Template_man_1, sheet_name_act, 57, act_col_adj)  
+    formula_newkpi_sum_2=f"={formula_act_new_2[1:]}-{Formula_ex_new_2[1:]}"
+
+    formula_act_new_3 = generate_excel_formula_1(251, column_index_New_KPI, sheet_name_new,result)
+    Formula_ex_new_4=extract_formula(file_path_Template_man_1, sheet_name_act, 83, act_col_adj)  
+    formula_newkpi_sum_4=f"={formula_act_new_3[1:]}-{Formula_ex_new_4[1:]}"
+
+    formula_act_new_5 = generate_excel_formula_1(313, column_index_New_KPI, sheet_name_new,result)
+    Formula_ex_new_41=extract_formula(file_path_Template_man_1, sheet_name_act, 138, act_col_adj) 
+    formula_newkpi_sum_41=f"={formula_act_new_5[1:]}-{Formula_ex_new_41[1:]}"
+    formula_act_new_6 = generate_excel_formula_1(335, column_index_New_KPI, sheet_name_new,result)
+    formula_act_new_7 = generate_excel_formula_1(45, column_index_New_KPI, sheet_name_new,result)
+    Formula_ex_new_16=extract_formula(file_path_Template_man_1, sheet_name_act, 214, act_col_adj)
+    formula_pl_sum_20=f"={Formula_ex_new_16[1:]}+{formula_act_new_7[1:]}"
+
+
+    formula_act_new_8 = generate_excel_formula_1(437, column_index_New_KPI, sheet_name_new,result)
+    formula_act_new_9 = generate_excel_formula_1(344, column_index_New_KPI, sheet_name_new,result)
+    formula_act_new_10 = generate_excel_formula_1(44, column_index_New_KPI, sheet_name_new,result)
+    formula_act_new_11 = generate_excel_formula_1(52, column_index_New_KPI, sheet_name_new,result)
+    # formula_act_new_20 = generate_excel_formula_1(45, column_index_New_KPI, sheet_name_new,result)
+    Formula_ex_new_11=extract_formula(file_path_Template_man_1, sheet_name_act, 219, act_col_adj)
+    formula_newkpi_sum_11=f"={formula_act_new_8[1:]}+{formula_act_new_9[1:]}+{formula_act_new_10[1:]}+{formula_act_new_11[1:]}-{Formula_ex_new_11[1:]}"
+    
+
+    formula_act_pl_1 = generate_excel_formula_1(307, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_2 = generate_excel_formula_1(309, column_index_New_P_L, sheet_name_pl,result) 
+    formula_pl_sum_1=f"=-({formula_act_pl_1[1:]}+{formula_act_pl_2[1:]})"
+    
+    formula_act_pl_3 = generate_excel_formula_1(305, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_4 = generate_excel_formula_1(336, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_19 = generate_excel_formula_1(310, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_22 = generate_excel_formula_1(308, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_24 = generate_excel_formula_1(9, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_25 = generate_excel_formula_1(13, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_26 = generate_excel_formula_1(166, column_index_New_P_L, sheet_name_pl,result) 
+    # formula_act_pl_200=generate_excel_formula_1(4444,sheet_name_new)
+    formula_act_pl_27 = generate_excel_formula_1(162, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_29 = generate_excel_formula_1(164, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_pl_30 = generate_excel_formula_1(161, column_index_New_P_L, sheet_name_pl,result) 
+    formula_act_new_28 = generate_excel_formula_1(319, column_index_New_KPI, sheet_name_new,result)
+    formula_pl_sum_28=f"={formula_act_pl_27[1:]}+{formula_act_new_28[1:]}"
+
+    formula_pl_sum_10=f"={formula_act_pl_22[1:]}+{formula_act_pl_19[1:]}"
+
+
+    sheet_name_rel="Relief"
+    formula_act_rel_1 = generate_excel_formula(iln_export_nmuk_row2, column_index_P_L_Relief, sheet_name_rel,result) 
+    formula_act_rel_2 = generate_excel_formula(iln_export_nmisa_row2, column_index_P_L_Relief, sheet_name_rel,result) 
+    formula_act_rel_3 = generate_excel_formula(g_a_impairment_row2+1, column_index_P_L_Relief, sheet_name_rel,result) 
+    formula_rel_sum_1=f"=-({formula_act_rel_1[1:]}+{formula_act_rel_2[1:]}+{formula_act_rel_3[1:]})"
+
+    formula_act_rel_4 = generate_excel_formula(kd_itp_nmuk_row1, column_index_P_L_Relief, sheet_name_rel,result)
+    formula_act_rel_5 = generate_excel_formula(kd_itp_nmisa_row2, column_index_P_L_Relief, sheet_name_rel,result)
+    formula_act_rel_6 = generate_excel_formula(kd_itp_nmgr_row2, column_index_P_L_Relief, sheet_name_rel,result)
+    formula_act_rel_7 = generate_excel_formula(itp_cbu_nissan_row, column_index_P_L_Relief, sheet_name_rel,result)
+    formula_act_rel_8 = generate_excel_formula(itp_cbu_infiniti_row, column_index_P_L_Relief, sheet_name_rel,result)
+    formula_act_rel_9 = generate_excel_formula(itp_cbu_nissan_row-1, column_index_P_L_Relief, sheet_name_rel,result)
+    Formula_ex_new_rel_1=extract_formula(file_path_Template_man_1, sheet_name_act, 165, act_col_adj)
+
+    
+    formula_rel_sum_2=f"=-({formula_act_rel_4[1:]}+{formula_act_rel_5[1:]}+{formula_act_rel_6[1:]}+{formula_act_rel_7[1:]}+{formula_act_rel_8[1:]})"
+    formula_rel_sum_3=f"=-({formula_act_rel_1[1:]}+{formula_act_rel_2[1:]}+{formula_act_rel_4[1:]}+{formula_act_rel_5[1:]}+{formula_act_rel_6[1:]}+{formula_act_rel_7[1:]}+{formula_act_rel_8[1:]}+{formula_act_rel_9[1:]})-{Formula_ex_new_rel_1[1:]}"
+
+
+    formula_act_new_12 = generate_excel_formula_1(211, column_index_New_KPI, sheet_name_new,result)
+    formula_act_new_13 = generate_excel_formula_1(220, column_index_New_KPI, sheet_name_new,result)
+    formula_act_new_21 = generate_excel_formula_1(468, column_index_New_KPI, sheet_name_new,result)
+    Formula_ex_new_rel_12=extract_formula(file_path_Template_man_1, sheet_name_act, 246, act_col_adj)
+    formula_rel_sum_11=f"={formula_act_new_21[1:]}-{Formula_ex_new_rel_12[1:]}"
+
+    formula_act_rel_10 = generate_excel_formula(connectivity_row, column_index_P_L_Relief, sheet_name_rel,result)
+    formula_rel_sum_4=f"={formula_act_new_12[1:]}-{formula_act_rel_10[1:]}"
+    Formula_ex_new_rel_2=extract_formula(file_path_Template_man_1, sheet_name_act, 192, act_col_adj)
+    formula_rel_sum_5=f"=-{formula_act_rel_10[1:]}+{formula_act_new_13[1:]}-{Formula_ex_new_rel_2[1:]}"
+
+    column_index_ACT=act_col_adj+1#for openpy
+
+    f7= generate_excel_formula_1(102, column_index_New_P_L, sheet_name_pl,result) 
+    sheet_name_act='Act'
+    f8= generate_excel_formula_1(23, column_index_ACT, sheet_name_act,file_path_Template_1)
+
+    sheet_names_buget=["GW Budget"]
+    col_adj_goodwill=col_adj_goodwill+1
+   
+
+
+
+
+    sheet_names = ['CFMI','Act'] 
+    
+
+   
+    cell_updates = [
+            [(4,column_index_CFMI+1,var_Cfmi)],
+            [(5,column_index_ACT,formula_act_2),
+            (6,column_index_ACT,formula_sum_act_1),
+            (7,column_index_ACT,formula_act_5),
+            (12,column_index_ACT,formula_act_6),
+            (13,column_index_ACT,formula_act_7),
+            (14,column_index_ACT,formula_act_8),
+            (16,column_index_ACT,formula_sum_act_3),
+            (17,column_index_ACT,formula_relief_1),
+            (18,column_index_ACT,formula_act_9),
+            (23,column_index_ACT,formula_act_10),
+            (26,column_index_ACT,formula_act_11),
+            (29,column_index_ACT,formula_act_12),
+            (30,column_index_ACT,formula_sum_act_2),
+            (33,column_index_ACT,formula_act_osp_sum),
+            (37,column_index_ACT,formula_act_osp_1),
+            (57,column_index_ACT,formula_newkpi_sum_2),
+            (64,column_index_ACT,formula_act_new_3),
+            (84,column_index_ACT,formula_newkpi_sum_4),
+            (114,column_index_ACT,formula_pl_sum_1),
+            (126,column_index_ACT,formula_act_pl_3),
+            (138,column_index_ACT,formula_newkpi_sum_41),
+            (141,column_index_ACT,formula_rel_sum_1),
+            (144,column_index_ACT,formula_rel_sum_2),
+            (165,column_index_ACT,formula_rel_sum_3),
+            (171,column_index_ACT,formula_rel_sum_4),
+            (192,column_index_ACT,formula_rel_sum_5),
+            (198,column_index_ACT,formula_act_new_6),
+            (209,column_index_ACT,formula_sum_act_10),
+            (210,column_index_ACT,formula_act_cfmi),
+            (213,column_index_ACT,formula_act_pl_4),
+            (214,column_index_ACT,formula_pl_sum_20),
+            (219,column_index_ACT,formula_newkpi_sum_11),
+            (246,column_index_ACT,formula_rel_sum_11),
+            (253,column_index_ACT,formula_act_new_7),
+            (260,column_index_ACT,formula_pl_sum_10),
+            (267,column_index_ACT,formula_act_pl_30),
+            (268,column_index_ACT,formula_act_pl_29),
+            (270,column_index_ACT,formula_pl_sum_28),
+            (283,column_index_ACT,formula_act_pl_26),
+            # (291,column_index_ACT,)
+            (292,column_index_ACT,formula_act_pl_24),
+            (293,column_index_ACT,formula_act_pl_25),
+            (295,column_index_ACT,Var_Converter)
+
+            ]]
+
+    file_path_new_KPI_latest=paste_values_KPI_PL(file_path_Template_1, sheet_names, cell_updates,month_number,output_path)  
+    f8= generate_excel_formula_1(23, column_index_ACT-1, sheet_name_act,file_path_new_KPI_latest) 
+
+    cell_updates_goodwill=[
+           [(5,col_adj_goodwill,f1),
+            (6,col_adj_goodwill,f2),
+            (9,col_adj_goodwill,f3),
+            (10,col_adj_goodwill,f4),
+            (14,col_adj_goodwill,f5),
+            (15,col_adj_goodwill,f6),
+            (20,col_adj_goodwill,f7),
+            (21,col_adj_goodwill,f8),
+            (24,col_adj_goodwill,var_Cfmi)]
+
+    ]
+    
+    paste_values_goodwill(file_path_goodwill_template, sheet_names_buget, cell_updates_goodwill,month_number,output_path)      
+
+    
+    
+ 
+
+
