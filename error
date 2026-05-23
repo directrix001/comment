@@ -1,0 +1,10 @@
+[20:10:19] ❌  FATAL ERROR in: Calculation Engine (calculate_alternate_value_1)
+[20:10:20]     TypeError: can only concatenate str (not "int") to str
+[20:10:20]     Traceback (most recent call last):
+[20:10:20]       File "c:\Users\800113527\OneDrive - Genpact\Nissan\Final_Code_Nissan_V1.4_latest\UI_2.py", line 670, in perform_calculation_2
+[20:10:20]         calculate_alternate_value_1(
+[20:10:20]       File "c:\Users\800113527\OneDrive - Genpact\Nissan\Final_Code_Nissan_V1.4_latest\Submit_2.py", line 2438, in calculate_alternate_value_1
+[20:10:20]         f_kpi_4_1 = frel(row_rel_iln_nmuk + 1) if row_rel_iln_nmuk else Z
+[20:10:20]                          ~~~~~~~~~~~~~~~~~^~~
+[20:10:20]     TypeError: can only concatenate str (not "int") to str
+[20:10:20] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
