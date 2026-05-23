@@ -1,1850 +1,1283 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import base64, os, re, calendar, time
-from typing import List, Tuple, Optional
-from dotenv import load_dotenv
+"""
+Submit_2.py  –  fully guarded calculation engine  (v4)
+-------------------------------------------------------
+Four-layer defence:
 
-load_dotenv()
-
-# ─────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────
-st.set_page_config(page_title="Variance Analysis Tool", layout="wide", initial_sidebar_state="collapsed")
-
-# ─────────────────────────────────────────────
-# LOGO HELPERS
-# ─────────────────────────────────────────────
-NISSAN_LOGO_PATH  = "uzsbf2-nissan-logo-picture.png"
-GENPACT_LOGO_PATH = "Logo2.png"
-
-def img_to_b64(path):
-    if path and os.path.exists(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    return None
-
-nissan_b64  = img_to_b64(NISSAN_LOGO_PATH)
-genpact_b64 = img_to_b64(GENPACT_LOGO_PATH)
-
-def logo_tag(b64, alt, height=44):
-    if b64:
-        return f'<img src="data:image/png;base64,{b64}" alt="{alt}" style="height:{height}px;object-fit:contain;">'
-    color = "#c8102e" if alt == "Nissan" else "#00a651"
-    return f'<span style="color:{color};font-weight:800;font-size:1.1rem;letter-spacing:2px;">{alt.upper()}</span>'
-
-# ─────────────────────────────────────────────
-# CSS
-# ─────────────────────────────────────────────
-HEADER_H = 64
-FOOTER_H = 50
-
-st.markdown(f"""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
-
-*, *::before, *::after {{ box-sizing: border-box; }}
-
-html, body, [data-testid="stAppViewContainer"] {{
-    background: #070c14 !important;
-    font-family: 'Sora', sans-serif !important;
-}}
-[data-testid="stMain"] {{
-    background: #f1f5fb !important;
-}}
-[data-testid="stMain"] > div:first-child {{
-    background: #f1f5fb !important;
-    color: #0f1f3d !important;
-    padding-top: {HEADER_H + 22}px !important;
-    padding-bottom: {FOOTER_H + 22}px !important;
-    padding-left: 48px !important;
-    padding-right: 48px !important;
-}}
-[data-testid="stMain"] p,
-[data-testid="stMain"] span,
-[data-testid="stMain"] label,
-[data-testid="stMain"] div {{ color: #0f1f3d; }}
-
-#MainMenu, header[data-testid="stHeader"], footer {{ display:none !important; }}
-[data-testid="stSidebar"] {{ display:none !important; }}
-
-/* ── HEADER ── */
-.va-header {{
-    position: fixed; top: 0; left: 0; right: 0;
-    height: {HEADER_H}px; background: #070c14;
-    border-bottom: 1px solid #1a2744;
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0 32px; z-index: 9999;
-    box-shadow: 0 4px 32px rgba(0,0,0,.6);
-}}
-.va-header-center {{
-    display: flex; flex-direction: column; align-items: center; gap: 1px;
-    flex: 1;
-}}
-.va-header-title {{
-    font-family: 'Sora', sans-serif;
-    font-size: .95rem; font-weight: 800; letter-spacing: .18em;
-    color: #ffffff !important; text-transform: uppercase;
-}}
-.va-header-title em {{ color: #60a5fa !important; font-style: normal; }}
-.va-header-sub {{
-    font-size: .6rem; letter-spacing: .14em;
-    color: #c8d6f0 !important; text-transform: uppercase;
-}}
-
-/* ── FOOTER ── */
-.va-footer {{
-    position: fixed; bottom: 0; left: 0; right: 0;
-    height: {FOOTER_H}px; background: #070c14;
-    border-top: 1px solid #1a2744;
-    display: flex; align-items: center; justify-content: center;
-    gap: 24px; z-index: 9999; font-size: .68rem; letter-spacing: .06em;
-}}
-.va-footer span {{ color: #d0ddf5 !important; }}
-.va-footer a {{ color: #93c5fd !important; text-decoration: none; }}
-.va-footer-sep {{ color: #3a4f78 !important; }}
-
-/* ── Section Label ── */
-.va-section-label {{
-    font-family: 'Sora', sans-serif;
-    font-size: .65rem; font-weight: 700; letter-spacing: .18em;
-    text-transform: uppercase; color: #2563eb !important;
-    margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
-}}
-.va-section-label::after {{
-    content: ''; flex: 1; height: 1px; background: #d1dced;
-}}
-
-/* ── Divider ── */
-.va-divider {{ border: none; border-top: 1px solid #d8e2f0; margin: 22px 0; }}
-
-/* ── Cards ── */
-.va-card {{
-    background: #ffffff; border: 1px solid #dce6f5;
-    border-radius: 12px; padding: 16px 20px; margin-bottom: 12px;
-    box-shadow: 0 1px 4px rgba(15,31,61,.06);
-}}
-.va-metric-card {{
-    background: #fff; border: 1px solid #dce6f5;
-    border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
-    box-shadow: 0 1px 3px rgba(15,31,61,.05);
-}}
-.va-metric-card .mlabel {{
-    font-size: .62rem; letter-spacing: .1em; text-transform: uppercase;
-    color: #6b7fa3 !important; margin-bottom: 5px;
-}}
-.va-metric-card .mvalue {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 1.35rem; font-weight: 600; color: #0f1f3d !important;
-}}
-.va-metric-card .msub {{ font-size: .68rem; color: #8a99bc !important; margin-top: 3px; }}
-
-/* ── Hotspot 4-card row ── */
-.hs-row {{
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-    margin-bottom: 18px;
-}}
-.hs-card {{
-    border-radius: 10px;
-    padding: 12px 14px;
-    border: 1px solid;
-    position: relative;
-    overflow: hidden;
-}}
-.hs-card .hs-rank {{
-    position: absolute; top: 8px; right: 10px;
-    font-size: .6rem; font-weight: 800; letter-spacing: .12em;
-    text-transform: uppercase; opacity: .7;
-}}
-.hs-card .hs-dim {{
-    font-size: .58rem; font-weight: 700; letter-spacing: .1em;
-    text-transform: uppercase; margin-bottom: 4px; opacity: .75;
-}}
-.hs-card .hs-name {{
-    font-family: 'Sora', sans-serif;
-    font-size: .78rem; font-weight: 700;
-    margin-bottom: 8px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}}
-.hs-card .hs-delta {{
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 1.05rem; font-weight: 700; margin-bottom: 2px;
-}}
-.hs-card .hs-meta {{
-    font-size: .62rem; opacity: .7; margin-top: 4px;
-}}
-.hs-card.r1 {{ background: #fef2f2; border-color: #dc2626; color: #7f1d1d !important; }}
-.hs-card.r1 .hs-delta {{ color: #dc2626 !important; }}
-.hs-card.r2 {{ background: #fff5f5; border-color: #f87171; color: #991b1b !important; }}
-.hs-card.r2 .hs-delta {{ color: #ef4444 !important; }}
-.hs-card.r3 {{ background: #fff8f8; border-color: #fca5a5; color: #b91c1c !important; }}
-.hs-card.r3 .hs-delta {{ color: #f87171 !important; }}
-.hs-card.r4 {{ background: #fffbfb; border-color: #fecaca; color: #c4392a !important; }}
-.hs-card.r4 .hs-delta {{ color: #fca5a5 !important; }}
-
-/* ── Pivot table ── */
-.pivot-wrap {{
-    background: #fff; border: 1px solid #dce6f5; border-radius: 12px;
-    overflow: hidden; box-shadow: 0 1px 4px rgba(15,31,61,.06);
-}}
-.pivot-table {{ width: 100%; border-collapse: collapse; font-size: .82rem; }}
-.pivot-table thead th {{
-    background: #0f1f3d; color: #e8edf8 !important;
-    font-family: 'Sora', sans-serif; font-weight: 600;
-    font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
-    padding: 10px 14px; text-align: right; white-space: nowrap;
-    border: none;
-}}
-.pivot-table thead th.left {{ text-align: left; }}
-.pivot-table tbody tr.grand {{
-    background: #1e3a5f; border-bottom: 2px solid #2563eb;
-}}
-.pivot-table tbody tr.grand td {{
-    color: #e8edf8 !important; font-weight: 700;
-    font-family: 'JetBrains Mono', monospace; padding: 10px 14px;
-}}
-.pivot-table tbody tr.lvl1-header {{
-    background: #dde8f8; border-bottom: 1px solid #c4d4ed;
-}}
-.pivot-table tbody tr.lvl1-header td {{
-    font-weight: 700; color: #0d2a5a !important;
-    padding: 8px 14px; font-size: .8rem;
-}}
-.pivot-table tbody tr.lvl2-header {{
-    background: #eef4fc; border-bottom: 1px solid #d4e3f4;
-}}
-.pivot-table tbody tr.lvl2-header td {{
-    font-weight: 600; color: #1a3460 !important;
-    padding: 7px 14px; font-size: .78rem;
-}}
-.pivot-table tbody tr.subtotal {{
-    background: #f0f5fd; border-top: 1px solid #c4d4ed; border-bottom: 1px solid #c4d4ed;
-}}
-.pivot-table tbody tr.subtotal td {{
-    font-weight: 600; color: #0f1f3d !important;
-    font-family: 'JetBrains Mono', monospace; padding: 7px 14px;
-    font-size: .78rem; font-style: italic;
-}}
-.pivot-table tbody tr.detail {{
-    background: #fff; border-bottom: 1px solid #eff3fb;
-}}
-.pivot-table tbody tr.detail:hover {{ background: #f5f9ff; }}
-.pivot-table tbody tr.detail td {{
-    color: #233057 !important; padding: 6px 14px;
-    font-family: 'JetBrains Mono', monospace; font-size: .78rem;
-}}
-.pivot-table td.label-cell {{ text-align: left; font-family: 'Sora', sans-serif !important; }}
-.pivot-table td.num {{ text-align: right; }}
-.pivot-table td.fav {{ color: #059669 !important; font-weight: 700; }}
-.pivot-table td.adv {{ color: #dc2626 !important; font-weight: 700; }}
-.pivot-table td.neutral {{ color: #6b7fa3 !important; }}
-.pivot-table td.indent1 {{ padding-left: 28px !important; }}
-.pivot-table td.indent2 {{ padding-left: 46px !important; }}
-.pivot-table td.indent3 {{ padding-left: 64px !important; }}
-
-/* ── File uploader ── */
-[data-testid="stFileUploader"] {{
-    background: #fff !important; border: 1.5px dashed #93c5fd !important;
-    border-radius: 12px !important; padding: 20px 28px !important;
-    box-shadow: 0 1px 4px rgba(59,130,246,.06) !important;
-}}
-[data-testid="stFileUploader"] label,
-[data-testid="stFileUploader"] span,
-[data-testid="stFileUploader"] p {{ color: #0f1f3d !important; }}
-
-/* ── Selectbox / Multiselect ── */
-[data-testid="stMultiSelect"] div[data-baseweb="select"] > div,
-[data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
-    background: #fff !important; border: 1px solid #93c5fd !important;
-    border-radius: 8px !important; color: #0f1f3d !important;
-}}
-[data-testid="stMain"] .stSelectbox label,
-[data-testid="stMain"] .stMultiSelect label {{ color: #0f1f3d !important; font-weight: 500; font-size:.82rem; }}
-
-/* ── Tabs ── */
-[data-testid="stTabs"] [role="tablist"] {{
-    gap: 4px; border-bottom: 2px solid #dce6f5;
-}}
-[data-testid="stTabs"] [role="tab"] {{
-    font-family: 'Sora', sans-serif; font-weight: 600;
-    font-size: .78rem; letter-spacing: .08em;
-    color: #6b7fa3 !important; padding: 8px 20px;
-    border-radius: 8px 8px 0 0; border: none;
-    background: transparent;
-}}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{
-    color: #1d4ed8 !important; background: #eff5ff;
-    border-bottom: 2px solid #2563eb;
-}}
-
-/* ── Expander ── */
-[data-testid="stExpander"] {{
-    background: #fff !important; border: 1px solid #dce6f5 !important;
-    border-radius: 10px !important;
-}}
-[data-testid="stExpander"] summary {{ font-weight: 600 !important; color: #0f1f3d !important; }}
-
-/* ── Buttons — RED with WHITE text ── */
-[data-testid="stButton"] button {{
-    background: #dc2626 !important; color: #ffffff !important;
-    border: none !important; border-radius: 8px !important;
-    font-family: 'Sora', sans-serif !important;
-    font-weight: 600 !important; letter-spacing: .04em !important; padding: 8px 22px !important;
-    font-size: .8rem !important;
-}}
-[data-testid="stButton"] button:hover {{ background: #b91c1c !important; color: #ffffff !important; }}
-[data-testid="stButton"] button * {{ color: #ffffff !important; }}
-
-/* ── Download button ── */
-[data-testid="stDownloadButton"] button {{
-    background: #059669 !important; color: #fff !important;
-    border: none !important; border-radius: 8px !important;
-    font-family: 'Sora', sans-serif !important;
-    font-weight: 600 !important; padding: 8px 22px !important;
-    font-size: .8rem !important;
-}}
-[data-testid="stDownloadButton"] button:hover {{ background: #047857 !important; }}
-
-/* ── Alerts ── */
-[data-testid="stInfo"] {{
-    background: #eff6ff !important; border: 1px solid #93c5fd !important;
-    border-radius: 8px !important; color: #1d4ed8 !important;
-}}
-[data-testid="stWarning"] {{
-    background: #fffbeb !important; border: 1px solid #fbbf24 !important;
-    border-radius: 8px !important; color: #92400e !important;
-}}
-[data-testid="stSuccess"] {{
-    background: #ecfdf5 !important; border: 1px solid #6ee7b7 !important;
-    border-radius: 8px !important; color: #065f46 !important;
-}}
-[data-testid="stMain"] h1, [data-testid="stMain"] h2, [data-testid="stMain"] h3 {{ color: #0f1f3d !important; }}
-[data-testid="stMain"] strong {{ color: #0f1f3d !important; }}
-
-/* ── Progress bar — grey ── */
-[data-testid="stProgressBar"] > div > div {{
-    background: #9ca3af !important;
-}}
-[data-testid="stProgressBar"] {{
-    background: #e5e7eb !important;
-    border-radius: 99px !important;
-}}
-
-/* ══════════════════════════════════════════
-   TAB 3 — COMMENTARY GENERATOR STYLES
-═══════════════════════════════════════════ */
-
-/* Source toggle pill */
-.cg-source-pill {{
-    display: inline-flex; gap: 0; border-radius: 8px;
-    overflow: hidden; border: 1px solid #dce6f5; margin-bottom: 16px;
-}}
-.cg-source-pill span {{
-    padding: 6px 18px; font-size: .72rem; font-weight: 600;
-    letter-spacing: .06em; cursor: pointer;
-    background: #fff; color: #6b7fa3 !important;
-    border: none; user-select: none;
-}}
-.cg-source-pill span.active {{
-    background: #1d4ed8; color: #fff !important;
-}}
-
-/* Status banner */
-.cg-status-ok {{
-    background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px;
-    padding: 10px 16px; display: flex; align-items: center; gap: 10px;
-    font-size: .8rem; color: #065f46 !important; margin-bottom: 14px;
-}}
-.cg-status-warn {{
-    background: #fffbeb; border: 1px solid #fbbf24; border-radius: 8px;
-    padding: 10px 16px; display: flex; align-items: center; gap: 10px;
-    font-size: .8rem; color: #92400e !important; margin-bottom: 14px;
-}}
-
-/* AI config card */
-.cg-config-card {{
-    background: #fff; border: 1px solid #dce6f5; border-radius: 12px;
-    padding: 18px 22px; margin-bottom: 16px;
-}}
-.cg-config-card .cg-config-title {{
-    font-size: .7rem; font-weight: 700; letter-spacing: .14em;
-    text-transform: uppercase; color: #2563eb !important; margin-bottom: 12px;
-}}
-
-/* Report output card */
-.cg-report-wrap {{
-    background: #fff; border: 1px solid #c4d4ed; border-radius: 14px;
-    padding: 28px 32px; margin-top: 10px;
-    box-shadow: 0 2px 12px rgba(15,31,61,.07);
-    font-family: 'Sora', sans-serif;
-    line-height: 1.7;
-}}
-.cg-report-wrap h3 {{
-    font-size: .9rem; font-weight: 700; letter-spacing: .06em;
-    color: #0f1f3d !important; margin: 18px 0 6px;
-    padding-bottom: 4px; border-bottom: 1px solid #e8edf8;
-}}
-.cg-report-wrap p {{ color: #2d3f60 !important; font-size: .85rem; margin: 6px 0; }}
-
-/* Trace expander inner */
-.cg-trace-block {{
-    background: #f8faff; border: 1px solid #dce6f5; border-radius: 8px;
-    padding: 14px 18px; margin-bottom: 6px; font-size: .78rem;
-}}
-.cg-trace-block.primary {{
-    background: #eff5ff; border-color: #93c5fd; font-weight: 700;
-}}
-.cg-trace-block.final {{
-    background: #ecfdf5; border-color: #6ee7b7;
-}}
-
-/* Env key badges */
-.cg-env-badge {{
-    display: inline-flex; align-items: center; gap: 6px;
-    background: #f0f5fd; border: 1px solid #c4d4ed;
-    border-radius: 20px; padding: 4px 12px;
-    font-size: .68rem; font-weight: 600; color: #1d4ed8 !important;
-    margin: 3px 4px 3px 0;
-}}
-.cg-env-badge.ok {{ background: #ecfdf5; border-color: #6ee7b7; color: #065f46 !important; }}
-.cg-env-badge.missing {{ background: #fef2f2; border-color: #fca5a5; color: #dc2626 !important; }}
-</style>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-# HEADER & FOOTER
-# ─────────────────────────────────────────────
-st.markdown(f"""
-<div class="va-header">
-    <div>{logo_tag(nissan_b64, "Nissan", 40)}</div>
-    <div class="va-header-center">
-        <div class="va-header-title">Variance <em>Analysis</em> Tool</div>
-        <div class="va-header-sub">Finance Data Pipeline · Scenario Intelligence</div>
-    </div>
-    <div>{logo_tag(genpact_b64, "Genpact", 36)}</div>
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown(f"""
-<div class="va-footer">
-    <span>© 2025 Genpact · Nissan Partnership</span>
-    <span class="va-footer-sep">|</span>
-    <span>Variance Analysis Platform</span>
-    <span class="va-footer-sep">|</span>
-    <span>Confidential &amp; Proprietary</span>
-    <span class="va-footer-sep">|</span>
-    <a href="#">Privacy Policy</a>
-    <span class="va-footer-sep">|</span>
-    <a href="#">Support</a>
-</div>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────
-FULL_TO_ABBR = {m: calendar.month_abbr[i] for i, m in enumerate(calendar.month_name) if m}
-ABBR_SET = set(calendar.month_abbr[1:])
-MONTH_HEADER_REGEX = r"\d{1,2}-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-MONTH_TO_FYNUM = {
-    "Apr": 1, "May": 2, "Jun": 3, "Jul": 4, "Aug": 5, "Sep": 6,
-    "Oct": 7, "Nov": 8, "Dec": 9, "Jan": 10, "Feb": 11, "Mar": 12
-}
-FY_NAMES = ["April","May","June","July","August","September","October","November","December","January","February","March"]
-FY_MONTH_OPTIONS = [f"{str(i+1).zfill(2)} - {FY_NAMES[i]}" for i in range(12)]
-PREF_GROUP_ORDER = ['OH/LC', 'CostCat description', 'Division_Desc', 'Function_Desc', 'Departement_desc', 'Entity_desc']
-MAPPING_PATH = os.path.join("backend", "mapping.xlsx")
-
-# ─────────────────────────────────────────────
-# HELPERS — TABS 1 & 2 (UNCHANGED)
-# ─────────────────────────────────────────────
-def normalize_month_header(col) -> str:
-    if hasattr(col, "strftime"):
-        return f"{col.day}-{col.strftime('%b')}"
-    s = str(col).strip()
-    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]+)$", s)
-    if m:
-        d = int(m.group(1))
-        mon_txt = m.group(2).capitalize()
-        if mon_txt in FULL_TO_ABBR:
-            return f"{d}-{FULL_TO_ABBR[mon_txt]}"
-        if len(mon_txt) == 3 and mon_txt.title() in ABBR_SET:
-            return f"{d}-{mon_txt.title()}"
-    m = re.match(r"^0?(\d{1,2})\s*[-/ ]\s*([A-Za-z]{3})$", s)
-    if m:
-        return f"{int(m.group(1))}-{m.group(2).title()}"
-    m = re.match(r"^0?(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$", s, re.IGNORECASE)
-    if m:
-        return f"{int(m.group(1))}-{m.group(2).title()}"
-    return s
-
-def normalize_df_headers(df: pd.DataFrame) -> pd.DataFrame:
-    df2 = df.copy()
-    df2.columns = [normalize_month_header(c) for c in df.columns]
-    return df2
-
-def get_month_cols(df: pd.DataFrame) -> List[str]:
-    return [c for c in df.columns if re.fullmatch(MONTH_HEADER_REGEX, str(c))]
-
-def compute_mtd_ytd(df: pd.DataFrame, fy_index: int) -> Tuple[pd.DataFrame, List[str], str]:
-    month_cols = get_month_cols(df)
-    if not month_cols:
-        raise ValueError("No month columns found (expected '1-Apr' format).")
-    df_month_numeric = df[month_cols].apply(pd.to_numeric, errors="coerce")
-    df = df.copy()
-    df["YTD"] = df_month_numeric.sum(axis=1)
-    num_to_col = {}
-    for c in month_cols:
-        parts = str(c).split("-")
-        if len(parts) < 2:
-            continue
-        mon = parts[1].title()
-        if mon in MONTH_TO_FYNUM:
-            num_to_col[MONTH_TO_FYNUM[mon]] = c
-    if fy_index not in num_to_col:
-        raise ValueError(f"FY month {fy_index} not present. Found: {sorted(num_to_col.keys())}")
-    target_col = num_to_col[fy_index]
-    df["MTD"] = pd.to_numeric(df[target_col], errors="coerce")
-    return df, month_cols, target_col
-
-def fmt_num(v):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "–"
-    try:
-        v = float(v)
-        if abs(v) >= 1_000_000:
-            return f"{v/1_000_000:,.2f}M"
-        if abs(v) >= 1_000:
-            return f"{v/1_000:,.1f}K"
-        return f"{v:,.0f}"
-    except:
-        return str(v)
-
-def fmt_num_full(v):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "–"
-    try:
-        return f"{float(v):,.2f}"
-    except:
-        return str(v)
-
-def fmt_pct(v):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "–"
-    try:
-        return f"{float(v)*100:+.2f}%"
-    except:
-        return str(v)
-
-def clean_numeric_series(s: pd.Series) -> pd.Series:
-    s2 = s.astype(str).str.strip()
-    s2 = s2.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
-    s2 = s2.str.replace(",", "", regex=False)
-    return pd.to_numeric(s2, errors="coerce").fillna(0.0)
-
-def variance_color_class(v, favorable_is_lower=True):
-    try:
-        f = float(v)
-        if f == 0:
-            return "neutral"
-        if favorable_is_lower:
-            return "fav" if f < 0 else "adv"
-        else:
-            return "fav" if f > 0 else "adv"
-    except:
-        return "neutral"
-
-# ─────────────────────────────────────────────
-# PIVOT TABLE BUILDER (HTML)
-# ─────────────────────────────────────────────
-def build_pivot_html(leaf_df: pd.DataFrame, group_cols: List[str], header_a: str, header_b: str, favorable_is_lower=True) -> str:
-    if leaf_df is None or leaf_df.empty:
-        return "<p>No data.</p>"
-
-    df_sorted = leaf_df.sort_values(group_cols).reset_index(drop=True)
-
-    def sums(part):
-        a = float(part["A"].sum()); b = float(part["B"].sum())
-        d = a - b; p = (d / b) if b != 0 else float("nan")
-        return a, b, d, p
-
-    def vc(v):
-        return variance_color_class(v, favorable_is_lower)
-
-    n_dim = len(group_cols)
-
-    rows_html = []
-
-    th_dims = "".join(f'<th class="left">{c}</th>' for c in group_cols)
-    th_nums = f'<th>{header_a}</th><th>{header_b}</th><th>Δ (A−B)</th><th>Δ% vs B</th>'
-    rows_html.append(f"<thead><tr>{th_dims}{th_nums}</tr></thead>")
-
-    rows_html.append("<tbody>")
-
-    A_t, B_t, D_t, P_t = sums(df_sorted)
-    gd_dims = f'<td class="label-cell" colspan="{n_dim}"><strong>GRAND TOTAL</strong></td>'
-    rows_html.append(
-        f'<tr class="grand">{gd_dims}'
-        f'<td class="num">{fmt_num_full(A_t)}</td>'
-        f'<td class="num">{fmt_num_full(B_t)}</td>'
-        f'<td class="num {vc(D_t)}">{fmt_num_full(D_t)}</td>'
-        f'<td class="num {vc(P_t)}">{fmt_pct(P_t)}</td>'
-        f'</tr>'
-    )
-
-    if n_dim == 1:
-        col = group_cols[0]
-        for val in df_sorted[col].astype(str).fillna("").unique():
-            part = df_sorted[df_sorted[col].astype(str).fillna("") == val]
-            a, b, d, p = sums(part)
-            rows_html.append(
-                f'<tr class="detail">'
-                f'<td class="label-cell">{val}</td>'
-                f'<td class="num">{fmt_num_full(a)}</td>'
-                f'<td class="num">{fmt_num_full(b)}</td>'
-                f'<td class="num {vc(d)}">{fmt_num_full(d)}</td>'
-                f'<td class="num {vc(p)}">{fmt_pct(p)}</td>'
-                f'</tr>'
-            )
-    else:
-        def recurse_html(sub_df, level):
-            col = group_cols[level]
-            is_second_last = (level == n_dim - 2)
-            css = f"lvl{level+1}-header"
-
-            for val in sub_df[col].astype(str).fillna("").unique():
-                part = sub_df[sub_df[col].astype(str).fillna("") == val]
-                indent = f"indent{level}" if level < 3 else "indent3"
-                blank_cols_before = "".join('<td></td>' for _ in range(level))
-                label_td = f'<td class="label-cell {indent}" colspan="{n_dim - level}"><strong>{val}</strong></td>'
-                rows_html.append(f'<tr class="{css}">{blank_cols_before}{label_td}<td></td><td></td><td></td><td></td></tr>')
-
-                if is_second_last:
-                    last_col = group_cols[-1]
-                    for lv in part[last_col].astype(str).fillna("").unique():
-                        part2 = part[part[last_col].astype(str).fillna("") == lv]
-                        a, b, d, p = sums(part2)
-                        blanks = "".join('<td></td>' for _ in range(n_dim - 1))
-                        indent2 = f"indent{level+1}" if level+1 < 3 else "indent3"
-                        rows_html.append(
-                            f'<tr class="detail">'
-                            f'{blanks}'
-                            f'<td class="label-cell {indent2}">{lv}</td>'
-                            f'<td class="num">{fmt_num_full(a)}</td>'
-                            f'<td class="num">{fmt_num_full(b)}</td>'
-                            f'<td class="num {vc(d)}">{fmt_num_full(d)}</td>'
-                            f'<td class="num {vc(p)}">{fmt_pct(p)}</td>'
-                            f'</tr>'
-                        )
-                else:
-                    recurse_html(part, level + 1)
-
-                a, b, d, p = sums(part)
-                sub_blanks = "".join('<td></td>' for _ in range(level))
-                sub_indent = f"indent{level}" if level < 3 else "indent3"
-                rows_html.append(
-                    f'<tr class="subtotal">'
-                    f'{sub_blanks}'
-                    f'<td class="label-cell {sub_indent}" colspan="{n_dim - level}"><em>{val} — Total</em></td>'
-                    f'<td class="num">{fmt_num_full(a)}</td>'
-                    f'<td class="num">{fmt_num_full(b)}</td>'
-                    f'<td class="num {vc(d)}">{fmt_num_full(d)}</td>'
-                    f'<td class="num {vc(p)}">{fmt_pct(p)}</td>'
-                    f'</tr>'
-                )
-
-        recurse_html(df_sorted, 0)
-
-    rows_html.append("</tbody>")
-    table_content = "\n".join(rows_html)
-    return f"""
-<div class="pivot-wrap" style="overflow-x:auto; max-height:620px; overflow-y:auto;">
-  <table class="pivot-table">{table_content}</table>
-</div>
+  Layer 1 – Input normalisation  : None paths→"", None DFs→empty DataFrame
+  Layer 2 – Presence flags       : HAS_* booleans block all row/col lookups
+                                   when the source DF or file is absent.
+  Layer 3 – Integer guardrail    : _int(v) converts EVERY value that comes
+                                   from a dict lookup to int before arithmetic.
+                                   If conversion fails → 0, so row+1 never
+                                   raises TypeError.
+  Layer 4 – Safe formula builders: _safe_gen_formula / _safe_extract_formula
+                                   return Z ("=0") when row==0 or col==0,
+                                   so generate_excel_formula is never called
+                                   with invalid arguments.
 """
 
-# ─────────────────────────────────────────────
-# HOTSPOT 4-CARD ROW BUILDER
-# ─────────────────────────────────────────────
-def build_hotspot_cards(leaf_df: pd.DataFrame, group_fields: List[str], favorable_is_lower: bool) -> str:
-    if leaf_df is None or leaf_df.empty or not group_fields:
-        return ""
-
-    last_dim = group_fields[-1]
-
-    agg = leaf_df.groupby(last_dim, dropna=False).agg(A=("A", "sum"), B=("B", "sum")).reset_index()
-    agg["delta"] = agg["A"] - agg["B"]
-    agg["pct"] = np.where(agg["B"] == 0, np.nan, agg["delta"] / agg["B"])
-
-    if favorable_is_lower:
-        sorted_agg = agg.sort_values("delta", ascending=False).head(4).reset_index(drop=True)
-    else:
-        sorted_agg = agg.sort_values("delta", ascending=True).head(4).reset_index(drop=True)
-
-    rank_classes = ["r1", "r2", "r3", "r4"]
-    rank_labels  = ["#1 Worst", "#2", "#3", "#4"]
-
-    cards_html = ""
-    for i, row in sorted_agg.iterrows():
-        rc   = rank_classes[i] if i < 4 else "r4"
-        rl   = rank_labels[i]  if i < 4 else f"#{i+1}"
-        name = str(row[last_dim])[:30] if pd.notna(row[last_dim]) else "–"
-        delta_str = fmt_num(row["delta"])
-        arrow = "▲" if row["delta"] > 0 else "▼"
-        pct_str = fmt_pct(row["pct"]) if pd.notna(row["pct"]) else "–"
-        a_str = fmt_num(row["A"])
-        b_str = fmt_num(row["B"])
-
-        cards_html += f"""
-<div class="hs-card {rc}">
-  <div class="hs-rank">{rl}</div>
-  <div class="hs-dim">{last_dim}</div>
-  <div class="hs-name" title="{name}">{name}</div>
-  <div class="hs-delta">{arrow} {delta_str}</div>
-  <div class="hs-meta">A: {a_str} &nbsp;|&nbsp; B: {b_str}</div>
-  <div class="hs-meta">Δ% vs B: {pct_str}</div>
-</div>"""
-
-    return f'<div class="hs-row">{cards_html}</div>'
-
-# ─────────────────────────────────────────────
-# EXCEL EXPORT
-# ─────────────────────────────────────────────
-def build_excel_export(leaf_df, group_fields, header_a, header_b, sel_period,
-                        sel_markets, sel_regions, sel_divisions,
-                        scenario_a, scenario_b, favorable_is_lower,
-                        pivot_source_long) -> bytes:
-    from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-    from openpyxl.formatting.rule import CellIsRule
-    from openpyxl.utils import get_column_letter
-    import io
-
-    wb = Workbook()
-
-    ws_readme = wb.active
-    ws_readme.title = "README"
-    readme_data = [
-        ("Period", sel_period),
-        ("Markets", ", ".join(sel_markets) if sel_markets else "All"),
-        ("Regions", ", ".join(sel_regions) if sel_regions else "All"),
-        ("Scenario A", header_a),
-        ("Scenario B", header_b),
-        ("Favorable when", "A < B (costs)" if favorable_is_lower else "A > B (revenue)"),
-        ("Division_Desc filter", ", ".join(sel_divisions) if sel_divisions else "All"),
-    ]
-    for r_idx, (k, v) in enumerate(readme_data, 1):
-        ws_readme.cell(r_idx, 1, k).font = Font(bold=True)
-        ws_readme.cell(r_idx, 2, v)
-    ws_readme.column_dimensions["A"].width = 28
-    ws_readme.column_dimensions["B"].width = 50
-
-    ws_flat = wb.create_sheet("Variance (Flat)")
-    flat = leaf_df.rename(columns={"A": header_a, "B": header_b})
-    flat_cols = group_fields + [header_a, header_b, "Δ (A-B)", "Δ% vs B"]
-    flat_out = flat[[c for c in flat_cols if c in flat.columns]]
-
-    hdr_fill = PatternFill(start_color="0F1F3D", end_color="0F1F3D", fill_type="solid")
-    hdr_font = Font(color="E8EDF8", bold=True)
-
-    for ci, col in enumerate(flat_out.columns, 1):
-        c = ws_flat.cell(1, ci, col)
-        c.fill = hdr_fill; c.font = hdr_font; c.alignment = Alignment(horizontal="center")
-
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-
-    for ri, row in enumerate(flat_out.itertuples(index=False), 2):
-        for ci, val in enumerate(row, 1):
-            ws_flat.cell(ri, ci, val)
-
-    nrows_flat = ws_flat.max_row
-    d_col = flat_out.columns.tolist().index("Δ (A-B)") + 1 if "Δ (A-B)" in flat_out.columns else None
-    p_col = flat_out.columns.tolist().index("Δ% vs B") + 1 if "Δ% vs B" in flat_out.columns else None
-
-    def add_cf_rules(ws, cidx, nrows, favorable_is_lower):
-        cl = get_column_letter(cidx)
-        rng = f"{cl}2:{cl}{nrows}"
-        if favorable_is_lower:
-            ws.conditional_formatting.add(rng, CellIsRule("greaterThan", ["0"], fill=red_fill))
-            ws.conditional_formatting.add(rng, CellIsRule("lessThan", ["0"], fill=green_fill))
-        else:
-            ws.conditional_formatting.add(rng, CellIsRule("greaterThan", ["0"], fill=green_fill))
-            ws.conditional_formatting.add(rng, CellIsRule("lessThan", ["0"], fill=red_fill))
-
-    if d_col:
-        add_cf_rules(ws_flat, d_col, nrows_flat, favorable_is_lower)
-    if p_col:
-        add_cf_rules(ws_flat, p_col, nrows_flat, favorable_is_lower)
-
-    for col in ws_flat.columns:
-        ws_flat.column_dimensions[get_column_letter(col[0].column)].width = 18
-    ws_flat.freeze_panes = "A2"
-
-    ws_piv = wb.create_sheet("Pivot (Outline)")
-
-    def sums(part):
-        a = float(part["A"].sum()); b = float(part["B"].sum())
-        d = a - b; p = (d / b) if b != 0 else float("nan")
-        return a, b, d, p
-
-    df_sorted = leaf_df.sort_values(group_fields).reset_index(drop=True)
-
-    piv_cols = group_fields + [header_a, header_b, "Δ (A-B)", "Δ% vs B"]
-    for ci, col in enumerate(piv_cols, 1):
-        c = ws_piv.cell(1, ci, col)
-        c.fill = hdr_fill; c.font = hdr_font; c.alignment = Alignment(horizontal="center")
-
-    row_cursor = [2]
-    spans = []
-
-    GRAND_FILL = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
-    GRAND_FONT = Font(color="E8EDF8", bold=True)
-    LVL1_FILL = PatternFill(start_color="DDE8F8", end_color="DDE8F8", fill_type="solid")
-    LVL2_FILL = PatternFill(start_color="EEF4FC", end_color="EEF4FC", fill_type="solid")
-    SUB_FILL = PatternFill(start_color="F0F5FD", end_color="F0F5FD", fill_type="solid")
-    BOLD = Font(bold=True)
-    ITALIC = Font(italic=True)
-
-    n_dim = len(group_fields)
-
-    def write_row(values, fill=None, font=None, indent_col=None, indent_val=0):
-        ri = row_cursor[0]
-        for ci, val in enumerate(values, 1):
-            c = ws_piv.cell(ri, ci, val)
-            if fill: c.fill = fill
-            if font: c.font = font
-            if indent_col and ci == indent_col:
-                c.alignment = Alignment(indent=indent_val)
-            if ci > n_dim:
-                c.number_format = '#,##0.00' if ci < n_dim + 5 else '0.00%'
-                c.alignment = Alignment(horizontal='right')
-        row_cursor[0] += 1
-        return ri
-
-    A_t, B_t, D_t, P_t = sums(df_sorted)
-    grand_vals = ["GRAND TOTAL"] + [""] * (n_dim - 1) + [A_t, B_t, D_t, P_t]
-    write_row(grand_vals, fill=GRAND_FILL, font=GRAND_FONT)
-
-    if n_dim == 1:
-        col = group_fields[0]
-        for val in df_sorted[col].astype(str).fillna("").unique():
-            part = df_sorted[df_sorted[col].astype(str).fillna("") == val]
-            a, b, d, p = sums(part)
-            write_row([val, a, b, d, p])
-    else:
-        def recurse_xl(sub_df, level):
-            col = group_fields[level]
-            is_second_last = (level == n_dim - 2)
-            fill = LVL1_FILL if level == 0 else LVL2_FILL
-
-            for val in sub_df[col].astype(str).fillna("").unique():
-                part = sub_df[sub_df[col].astype(str).fillna("") == val]
-                hdr_vals = [""] * n_dim + [None, None, None, None]
-                hdr_vals[level] = val
-                write_row(hdr_vals, fill=fill, font=BOLD, indent_col=level+1, indent_val=level)
-
-                child_start = row_cursor[0]
-
-                if is_second_last:
-                    last_col = group_fields[-1]
-                    for lv in part[last_col].astype(str).fillna("").unique():
-                        part2 = part[part[last_col].astype(str).fillna("") == lv]
-                        a, b, d, p = sums(part2)
-                        det_vals = [""] * n_dim + [a, b, d, p]
-                        det_vals[n_dim - 1] = lv
-                        write_row(det_vals, indent_col=n_dim, indent_val=level+1)
-                else:
-                    recurse_xl(part, level + 1)
-
-                child_end = row_cursor[0] - 1
-                if child_end >= child_start:
-                    spans.append((child_start, child_end, level + 1))
-
-                a, b, d, p = sums(part)
-                sub_vals = [""] * n_dim + [a, b, d, p]
-                sub_vals[level] = f"{val} — Total"
-                write_row(sub_vals, fill=SUB_FILL, font=ITALIC, indent_col=level+1, indent_val=level)
-
-        recurse_xl(df_sorted, 0)
-
-    nrows_piv = ws_piv.max_row
-    d_piv = n_dim + 3
-    p_piv = n_dim + 4
-    if nrows_piv > 1:
-        add_cf_rules(ws_piv, d_piv, nrows_piv, favorable_is_lower)
-        add_cf_rules(ws_piv, p_piv, nrows_piv, favorable_is_lower)
-
-    ws_piv.sheet_properties.outlinePr.summaryBelow = True
-    for start_r, end_r, outline_level in spans:
-        ws_piv.row_dimensions.group(start_r, end_r, outline_level=outline_level, hidden=True)
-
-    ws_piv.freeze_panes = "A2"
-    for col in ws_piv.columns:
-        ws_piv.column_dimensions[get_column_letter(col[0].column)].width = 20
-
-    if pivot_source_long is not None and not pivot_source_long.empty:
-        ws_src = wb.create_sheet("PivotSource")
-        src_cols = list(pivot_source_long.columns)
-        for ci, col in enumerate(src_cols, 1):
-            c = ws_src.cell(1, ci, col)
-            c.fill = hdr_fill; c.font = hdr_font
-        for ri, row in enumerate(pivot_source_long.itertuples(index=False), 2):
-            for ci, val in enumerate(row, 1):
-                ws_src.cell(ri, ci, val)
-        for col in ws_src.columns:
-            ws_src.column_dimensions[get_column_letter(col[0].column)].width = 18
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
-
-# ─────────────────────────────────────────────
-# LANGGRAPH — COMMENTARY GENERATOR LOGIC
-# ─────────────────────────────────────────────
-def _build_langgraph():
-    """Lazily import and compile the LangGraph workflow."""
-    from typing import TypedDict, List, Dict, Any
-    from langgraph.graph import StateGraph, START, END
-    from langchain_openai import AzureChatOpenAI
-    from langchain_core.messages import SystemMessage, HumanMessage
-
-    class AgentState(TypedDict):
-        df: pd.DataFrame
-        hierarchy_cols: List[str]
-        has_variance_col: bool
-        variance_col: str
-        base_scenario: str
-        compare_scenario: str
-        path_trace: List[str]
-        final_summary: str
-
-    def calculate_variance_node(state: AgentState) -> Dict[str, Any]:
-        df = state["df"].copy()
-        hierarchy = state.get("hierarchy_cols", [])
-        has_var = state.get("has_variance_col", True)
-        path_trace = []
-
-        if not hierarchy:
-            return {"path_trace": ["⚠️ Error: No hierarchy columns selected."]}
-
-        if has_var:
-            target_col = state.get("variance_col")
-            if target_col not in df.columns:
-                return {"path_trace": [f"⚠️ Error: Target column '{target_col}' not found."]}
-        else:
-            base_col = state.get("base_scenario")
-            comp_col = state.get("compare_scenario")
-            if base_col not in df.columns or comp_col not in df.columns:
-                return {"path_trace": ["⚠️ Error: Scenario columns not found."]}
-            target_col = "Calculated_Variance"
-            df[target_col] = pd.to_numeric(df[base_col], errors="coerce").fillna(0) - \
-                             pd.to_numeric(df[comp_col], errors="coerce").fillna(0)
-
-        df[target_col] = pd.to_numeric(df[target_col], errors="coerce").fillna(0)
-
-        total_variance = df[target_col].fillna(0).sum()
-        path_trace.append(f"**Overall Total Variance: {total_variance / 1e6:,.2f}M**\n")
-
-        first_level = hierarchy[0]
-        if first_level not in df.columns:
-            return {"path_trace": [f"⚠️ Error: Column '{first_level}' not found in data."]}
-
-        first_level_grouped = df.groupby(first_level)[target_col].sum()
-        top_primary_categories = first_level_grouped.reindex(
-            first_level_grouped.abs().sort_values(ascending=False).index
-        ).head(5)
-
-        for primary_cat, primary_val in top_primary_categories.items():
-            path_trace.append(f"=========================================")
-            path_trace.append(f"🔹 **Primary Category: '{primary_cat}'** (Total: {primary_val / 1e6:,.2f}M)")
-            path_trace.append(f"=========================================\n")
-
-            current_df = df[df[first_level] == primary_cat]
-
-            if len(hierarchy) == 1:
-                path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{first_level}'** ---")
-                for idx, (name, val) in enumerate(top_primary_categories.items(), 1):
-                    path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
-                continue
-
-            for i, level in enumerate(hierarchy[1:]):
-                is_last_level = (i == len(hierarchy[1:]) - 1)
-
-                if current_df.empty or level not in current_df.columns:
-                    break
-
-                grouped = current_df.groupby(level)[target_col].sum()
-
-                if grouped.empty or grouped.isna().all():
-                    break
-
-                top_5 = grouped.reindex(grouped.abs().sort_values(ascending=False).index).head(5)
-
-                if is_last_level:
-                    path_trace.append(f"--- **FINAL LEVEL: Top 5 Reasons in '{level}' (Inside {primary_cat})** ---")
-                else:
-                    path_trace.append(f"--- **Top 5 Drivers in '{level}' (Inside {primary_cat})** ---")
-
-                for idx, (name, val) in enumerate(top_5.items(), 1):
-                    path_trace.append(f"  {idx}. '{name}': {val / 1e6:,.2f}M")
-
-                if is_last_level:
-                    break
-
-                max_driver = top_5.index[0]
-                if pd.isna(max_driver):
-                    break
-
-                path_trace.append(f"\n*=> Drilling down into '{max_driver}'...*\n")
-                current_df = current_df[current_df[level] == max_driver]
-
-            path_trace.append("\n")
-
-        return {"path_trace": path_trace}
-
-    def synthesize_insight_node(state: AgentState) -> Dict[str, Any]:
-        if state["path_trace"] and "⚠️ Error" in state["path_trace"][0]:
-            return {"final_summary": "Analysis aborted due to invalid data configuration."}
-
-        llm = AzureChatOpenAI(
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_KEY"),
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION")
-        )
-
-        system_prompt = (
-            "You are a Senior Financial Controller presenting a variance report to the executive board. "
-            "You are reviewing a branched variance trace. All values are in Millions (M).\n\n"
-            "Generate a highly professional, clean Markdown report STRICTLY using this structure:\n\n"
-            "### 🎯 Executive Summary\n"
-            "[Provide a crisp 1-2 sentence overall conclusion regarding the total variance.]\n\n"
-            "### 📊 Key Root Causes by Category\n"
-            "[For each 'Primary Category' analyzed in the trace, create a bold sub-heading. Under it, "
-            "explicitly list the Top 5 reasons/drivers specifically from the 'FINAL LEVEL' identified in the trace, "
-            "including their exact variance amounts.]\n\n"
-            "Keep the tone strictly professional, objective, and the formatting exceptionally clean. "
-            "Do not add conversational filler."
-        )
-
-        trace_text = "\n".join(state["path_trace"])
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"Raw Data Trace:\n{trace_text}")
-        ]
-
-        response = llm.invoke(messages)
-        return {"final_summary": response.content}
-
-    workflow = StateGraph(AgentState)
-    workflow.add_node("calculate_variance", calculate_variance_node)
-    workflow.add_node("synthesize_insight", synthesize_insight_node)
-    workflow.add_edge(START, "calculate_variance")
-    workflow.add_edge("calculate_variance", "synthesize_insight")
-    workflow.add_edge("synthesize_insight", END)
-    return workflow.compile()
-
-# ─────────────────────────────────────────────
-# SESSION STATE
-# ─────────────────────────────────────────────
-for _k, _v in [
-    ("master_df", None),
-    ("final_db", None),
-    ("leaf_df", None),
-    ("pivot_source_long", None),
-    ("var_context", None),
-    ("cg_report", None),
-    ("cg_trace", None),
-]:
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
-
-# ─────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["🗂️  Tagetik Mapping", "📈  Variance Analysis", "🤖  Commentary Generator"])
-
-# ══════════════════════════════════════════════
-# TAB 1 — TARGET MAPPING  (UNCHANGED)
-# ══════════════════════════════════════════════
-with tab1:
-    st.markdown('<p class="va-section-label">📂 Upload Monthly Excel</p>', unsafe_allow_html=True)
-
-    uploaded_monthly = st.file_uploader(
-        "Drop your monthly Excel file here (.xlsx)",
-        type=["xlsx", "xls"],
-        key="monthly_upload"
+from __future__ import annotations
+
+import os
+import time
+
+import pandas as pd
+
+from Submit_2_Helper_function import (
+    find_row_numbers,
+    search_turnover_in_dataframe,
+    find_fmi_row_nv,
+    find_fmi_row_uc,
+    find_fmi_row_as,
+    find_fmi_row_export,
+    search_omp_terms,
+    search_manufacturing_terms,
+    MZ_Sheet_terms,
+    find_financial_indices,
+    find_oem_terms,
+    find_ocs_terms,
+    search_rd_terms,
+    find_R_and_D_File,
+    find_transfer_price_adjustment,
+    tax_and_public,
+    operating_profit,
+    relief_search_terms_new,
+    G_and_A_Reliev1,
+    export_ITP_Export,
+    energy_tgk_68,
+    find_columns_with_month_short,
+    find_columns_with_month_long,
+    find_month_columns_Relief_KD,
+    find_month_columns_export,
+    find_indices_feuil,
+    find_op_and_month,
+    find_outside_profit_and_month_value,
+    find_second_column_for_outside_profit,
+    generate_excel_formula,
+    generate_excel_formula_249,
+    extract_formula,
+    extract_value_formula_latest,
+    manage_sheet_visibility,
+    paste_values_KPI_PL,
+)
+from ACT import ACT
+from utils.logger import logger
+
+logger.info("Submit_2 triggered")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SENTINEL
+# ─────────────────────────────────────────────────────────────────────────────
+Z = "=0"   # written to cells when data is unavailable
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 3  –  INTEGER GUARDRAIL
+#  Apply to EVERY value from a dict lookup before doing arithmetic on it.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _int(v) -> int:
+    """
+    Safely convert v to int.
+    Handles: int, float, str-of-digits, None, empty-string → 0 on any failure.
+    This prevents TypeError when dict values are accidentally strings.
+    """
+    if v is None:
+        return 0
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        logger.warning(f"_int(): could not convert {v!r} to int – using 0")
+        return 0
+
+
+def _int_list(lst) -> list:
+    """Convert every element of a list/tuple to int via _int()."""
+    if not lst:
+        return [0]
+    return [_int(x) for x in lst]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 1  –  INPUT CHECKERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _df_ok(df, name: str) -> bool:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        logger.warning(f"[SKIP] DataFrame '{name}' absent/empty – cells → =0")
+        return False
+    return True
+
+
+def _file_ok(path: str, name: str) -> bool:
+    if not path or not os.path.isfile(path):
+        logger.warning(f"[SKIP] File '{name}' not found ({path!r}) – formulas → =0")
+        return False
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 2  –  SAFE WRAPPERS FOR EVERY HELPER FUNCTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _safe_col_short(df, month, name):
+    if not _df_ok(df, name): return 0
+    try:    return _int(find_columns_with_month_short(df, month))
+    except Exception as e:
+        logger.warning(f"find_columns_with_month_short({name}): {e}"); return 0
+
+def _safe_col_long(df, month, name):
+    if not _df_ok(df, name): return 0
+    try:    return _int(find_columns_with_month_long(df, month))
+    except Exception as e:
+        logger.warning(f"find_columns_with_month_long({name}): {e}"); return 0
+
+def _safe_find_row_numbers(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return find_row_numbers(df) or {}
+    except Exception as e:
+        logger.warning(f"find_row_numbers({name}): {e}"); return {}
+
+def _safe_search_turnover(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_turnover_in_dataframe(df) or {}
+    except Exception as e:
+        logger.warning(f"search_turnover({name}): {e}"); return {}
+
+def _safe_find_fmi_nv(df, name):
+    if not _df_ok(df, name): return (0,)*16
+    try:    return tuple(_int(x) for x in find_fmi_row_nv(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_nv({name}): {e}"); return (0,)*16
+
+def _safe_find_fmi_uc(df, name):
+    if not _df_ok(df, name): return (0,)*12
+    try:    return tuple(_int(x) for x in find_fmi_row_uc(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_uc({name}): {e}"); return (0,)*12
+
+def _safe_find_fmi_as(df, name):
+    if not _df_ok(df, name): return (0,)*16
+    try:    return tuple(_int(x) for x in find_fmi_row_as(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_as({name}): {e}"); return (0,)*16
+
+def _safe_find_fmi_export(df, name):
+    if not _df_ok(df, name): return (0,)*16
+    try:    return tuple(_int(x) for x in find_fmi_row_export(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_export({name}): {e}"); return (0,)*16
+
+def _safe_omp(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_omp_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"search_omp_terms({name}): {e}"); return {}
+
+def _safe_manufacturing(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_manufacturing_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"search_manufacturing_terms({name}): {e}"); return {}
+
+def _safe_mz_sheet(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return MZ_Sheet_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"MZ_Sheet_terms({name}): {e}"); return {}
+
+def _safe_financial_indices(df, name):
+    if not _df_ok(df, name): return ([0],[0],[0],[0],[0])
+    try:
+        result = find_financial_indices(df)
+        # Each element is a list; make sure every item is int
+        return tuple(_int_list(lst) for lst in result)
+    except Exception as e:
+        logger.warning(f"find_financial_indices({name}): {e}")
+        return ([0],[0],[0],[0],[0])
+
+def _safe_oem_terms(df, name):
+    if not _df_ok(df, name): return ([0],[0],[0],[0],[0],[0],[0],[0])
+    try:
+        result = find_oem_terms(df)
+        return tuple(_int_list(lst) for lst in result)
+    except Exception as e:
+        logger.warning(f"find_oem_terms({name}): {e}")
+        return ([0],[0],[0],[0],[0],[0],[0],[0])
+
+def _safe_ocs_terms(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(find_ocs_terms(df) or [0])
+    except Exception as e:
+        logger.warning(f"find_ocs_terms({name}): {e}"); return [0]
+
+def _safe_rd_terms(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_rd_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"search_rd_terms({name}): {e}"); return {}
+
+def _safe_rd_file(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return find_R_and_D_File(df) or {}
+    except Exception as e:
+        logger.warning(f"find_R_and_D_File({name}): {e}"); return {}
+
+def _safe_transfer_price(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(find_transfer_price_adjustment(df) or [0])
+    except Exception as e:
+        logger.warning(f"find_transfer_price_adjustment({name}): {e}"); return [0]
+
+def _safe_tax(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(tax_and_public(df) or [0])
+    except Exception as e:
+        logger.warning(f"tax_and_public({name}): {e}"); return [0]
+
+def _safe_op(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(operating_profit(df) or [0])
+    except Exception as e:
+        logger.warning(f"operating_profit({name}): {e}"); return [0]
+
+def _safe_reclass(df, name) -> int:
+    if not _df_ok(df, name): return 0
+    try:
+        r = G_and_A_Reliev1(df)
+        return _int(r) if r is not None else 0
+    except Exception as e:
+        logger.warning(f"G_and_A_Reliev1({name}): {e}"); return 0
+
+def _safe_relief(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return relief_search_terms_new(df) or {}
+    except Exception as e:
+        logger.warning(f"relief_search_terms_new({name}): {e}"); return {}
+
+def _safe_outside_profit(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_outside_profit_and_month_value(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_outside_profit_and_month_value({name}): {e}"); return (0, 0)
+
+def _safe_outside_profit_2(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_second_column_for_outside_profit(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_second_column_for_outside_profit({name}): {e}"); return (0, 0)
+
+def _safe_feuil(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_indices_feuil(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_indices_feuil({name}): {e}"); return (0, 0)
+
+def _safe_relief_kd_cols(df, month, name):
+    if not _df_ok(df, name): return [0, 0]
+    try:    return _int_list(find_month_columns_Relief_KD(df, month) or [0, 0])
+    except Exception as e:
+        logger.warning(f"find_month_columns_Relief_KD({name}): {e}"); return [0, 0]
+
+def _safe_itp_rows(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(export_ITP_Export(df) or [0])
+    except Exception as e:
+        logger.warning(f"export_ITP_Export({name}): {e}"); return [0]
+
+def _safe_itp_cols(df, month, name):
+    if not _df_ok(df, name): return [0, 0]
+    try:    return _int_list(find_month_columns_export(df, month) or [0, 0])
+    except Exception as e:
+        logger.warning(f"find_month_columns_export({name}): {e}"); return [0, 0]
+
+def _safe_nano(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_op_and_month(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_op_and_month({name}): {e}"); return (0, 0)
+
+def _safe_energy(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(energy_tgk_68(df) or [0])
+    except Exception as e:
+        logger.warning(f"energy_tgk_68({name}): {e}"); return [0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 4  –  SAFE FORMULA BUILDERS
+#  _safe_gen_formula gates on row>0 AND col>0.
+#  Because ALL row/col values are ints (via _int()), arithmetic is safe.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _safe_gen_formula(row: int, col: int, sheet: str,
+                      file_path: str = "") -> str:
+    row, col = _int(row), _int(col)   # final int guardrail
+    if not row or not col:
+        logger.debug(f"_safe_gen_formula skipped: row={row} col={col} sheet={sheet}")
+        return Z
+    if file_path and not _file_ok(file_path, f"cross-wb [{sheet}]"):
+        return Z
+    try:
+        return generate_excel_formula(row, col, sheet,
+                                      file_path if file_path else None)
+    except Exception as e:
+        logger.warning(f"generate_excel_formula(r={row},c={col},{sheet}): {e}")
+        return Z
+
+
+def _safe_extract_formula(file_path: str, sheet: str,
+                          row: int, col: int, label: str = "") -> str:
+    row, col = _int(row), _int(col)
+    if not row or not col:
+        return Z
+    if not _file_ok(file_path, label or f"template extract({sheet},{row},{col})"):
+        return Z
+    try:
+        result = extract_formula(file_path, sheet, row, col)
+        return result if result else Z
+    except Exception as e:
+        logger.warning(f"extract_formula({sheet},{row},{col}): {e}")
+        return Z
+
+
+def _safe_extract_value_formula(file_path: str, month: int) -> str:
+    if not _file_ok(file_path, "P&L file for extract_value_formula_latest"):
+        return Z
+    try:
+        r = extract_value_formula_latest(file_path, month)
+        return r if r else Z
+    except Exception as e:
+        logger.warning(f"extract_value_formula_latest: {e}")
+        return Z
+
+
+def _safe_gen_formula_249(month: int, file_path_OSP: str) -> str:
+    if not _file_ok(file_path_OSP, "OSP file for generate_excel_formula_249"):
+        return Z
+    try:
+        r = generate_excel_formula_249(month, file_path_OSP)
+        return r if r else Z
+    except Exception as e:
+        logger.warning(f"generate_excel_formula_249: {e}")
+        return Z
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMPOUND FORMULA HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _join_sum(*formulas) -> str:
+    parts = [x[1:] for x in formulas if x and x != Z]
+    return f"={'  +  '.join(parts)}" if parts else Z
+
+
+def _compound(a: str, op: str, b: str) -> str:
+    if a == Z or b == Z:
+        return Z
+    return f"={a[1:]}{op}{b[1:]}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DICT-ROW EXTRACTOR  –  always returns int
+#  Use this instead of (dict.get(k) or [0])[0] everywhere.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _row_from_dict(d: dict, key: str) -> int:
+    """Extract first element of d[key] list as int; 0 on any failure."""
+    try:
+        val = d.get(key)
+        if not val:
+            return 0
+        return _int(val[0] if isinstance(val, (list, tuple)) else val)
+    except Exception:
+        return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUBLIC ENTRY-POINT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def calculate_alternate_value_1(
+    file_path_P_L: str,
+    df_P_L_ROP_NE:  pd.DataFrame,
+    df_P_L_HQ:      pd.DataFrame,
+    file_path_OSP:  str,
+    df_OSP:         pd.DataFrame,
+    file_path_HMF:  str,
+    df_HMF_Managerial: pd.DataFrame,
+    file_path_New_KPI: str,
+    df_P_L_New_KPI: pd.DataFrame,
+    file_HQ_Item:   str,
+    df_hQ_items:    pd.DataFrame,
+    file_goodwill:  str,
+    df_r_and_d:     pd.DataFrame,
+    df_MZ_conso:    pd.DataFrame,
+    df_P_L_Relief:  pd.DataFrame,
+    df_P_L_PL:      pd.DataFrame,
+    df_P_L_Reclass: pd.DataFrame,
+    df_P_L_MCCP:    pd.DataFrame,
+    df_P_L_OCS:     pd.DataFrame,
+    df_New_KPI_CFMI:  pd.DataFrame,
+    df_New_goodwill:  pd.DataFrame,
+    df_Act:           pd.DataFrame,
+    file_paths_OSP_TGK:    str,
+    df_1c_osp:             pd.DataFrame,
+    file_paths_High_Level_Variance: str,
+    df_high_variance_feuil:         pd.DataFrame,
+    file_paths_Relief_KD:  str,
+    df_Relief_KD:          pd.DataFrame,
+    file_paths_Purchase_Price: str,
+    df_Purchase_Price:         pd.DataFrame,
+    file_paths_UP_Calc:    str,
+    df_UP_Calc:            pd.DataFrame,
+    file_paths_NANO_HFM:   str,
+    df_nano_hfm:           pd.DataFrame,
+    file_paths_ITP:        str,
+    df_itp:                pd.DataFrame,
+    file_path_Template:      str,
+    file_path_Template_1:    str,
+    month_number:            int,
+    Var_Converter:           float,
+    var_Cfmi:                float,
+    ePWR_var:                float,
+    connectivity_var:        float,
+    cafe_penalty_var:        float,
+    file_path_Template_man_1: str,
+    file_path_Template_man:   str,
+    file_path_goodwill_template: str,
+    output_path:             str,
+    var_converter_bJPY:      str,
+    var_converter_mEUR:      str,
+) -> None:
+
+    t0 = time.time()
+    logger.info("calculate_alternate_value_1 started")
+
+    # ── Normalise inputs ──────────────────────────────────────────────────────
+    def _p(v): return v if isinstance(v, str) else ""
+    def _d(v): return v if isinstance(v, pd.DataFrame) else pd.DataFrame()
+
+    file_path_P_L               = _p(file_path_P_L)
+    file_path_OSP               = _p(file_path_OSP)
+    file_path_HMF               = _p(file_path_HMF)
+    file_path_New_KPI           = _p(file_path_New_KPI)
+    file_HQ_Item                = _p(file_HQ_Item)
+    file_goodwill               = _p(file_goodwill)
+    file_paths_OSP_TGK          = _p(file_paths_OSP_TGK)
+    file_paths_High_Level_Variance = _p(file_paths_High_Level_Variance)
+    file_paths_Relief_KD        = _p(file_paths_Relief_KD)
+    file_paths_Purchase_Price   = _p(file_paths_Purchase_Price)
+    file_paths_UP_Calc          = _p(file_paths_UP_Calc)
+    file_paths_NANO_HFM         = _p(file_paths_NANO_HFM)
+    file_paths_ITP              = _p(file_paths_ITP)
+    file_path_Template          = _p(file_path_Template)
+    file_path_Template_1        = _p(file_path_Template_1)
+    file_path_Template_man      = _p(file_path_Template_man)
+    file_path_Template_man_1    = _p(file_path_Template_man_1)
+    file_path_goodwill_template = _p(file_path_goodwill_template)
+
+    df_P_L_ROP_NE           = _d(df_P_L_ROP_NE)
+    df_P_L_HQ               = _d(df_P_L_HQ)
+    df_OSP                  = _d(df_OSP)
+    df_HMF_Managerial       = _d(df_HMF_Managerial)
+    df_P_L_New_KPI          = _d(df_P_L_New_KPI)
+    df_hQ_items             = _d(df_hQ_items)
+    df_r_and_d              = _d(df_r_and_d)
+    df_MZ_conso             = _d(df_MZ_conso)
+    df_P_L_Relief           = _d(df_P_L_Relief)
+    df_P_L_PL               = _d(df_P_L_PL)
+    df_P_L_Reclass          = _d(df_P_L_Reclass)
+    df_P_L_MCCP             = _d(df_P_L_MCCP)
+    df_P_L_OCS              = _d(df_P_L_OCS)
+    df_New_KPI_CFMI         = _d(df_New_KPI_CFMI)
+    df_New_goodwill         = _d(df_New_goodwill)
+    df_Act                  = _d(df_Act)
+    df_1c_osp               = _d(df_1c_osp)
+    df_high_variance_feuil  = _d(df_high_variance_feuil)
+    df_Relief_KD            = _d(df_Relief_KD)
+    df_Purchase_Price       = _d(df_Purchase_Price)
+    df_UP_Calc              = _d(df_UP_Calc)
+    df_nano_hfm             = _d(df_nano_hfm)
+    df_itp                  = _d(df_itp)
+
+    month_number = _int(month_number)
+    adj          = (month_number - 4) % 12
+
+    # ── Presence flags ────────────────────────────────────────────────────────
+    HAS_ROP_NE    = _df_ok(df_P_L_ROP_NE,           "df_P_L_ROP_NE")
+    HAS_HQ        = _df_ok(df_P_L_HQ,               "df_P_L_HQ")
+    HAS_OSP       = _df_ok(df_OSP,                  "df_OSP")
+    HAS_NEW_KPI   = _df_ok(df_P_L_New_KPI,          "df_P_L_New_KPI")
+    HAS_HQ_ITEMS  = _df_ok(df_hQ_items,             "df_hQ_items")
+    HAS_R_AND_D   = _df_ok(df_r_and_d,              "df_r_and_d")
+    HAS_MZ        = _df_ok(df_MZ_conso,             "df_MZ_conso")
+    HAS_RELIEF    = _df_ok(df_P_L_Relief,           "df_P_L_Relief")
+    HAS_PL_PL     = _df_ok(df_P_L_PL,              "df_P_L_PL")
+    HAS_RECLASS   = _df_ok(df_P_L_Reclass,         "df_P_L_Reclass")
+    HAS_MCCP      = _df_ok(df_P_L_MCCP,            "df_P_L_MCCP")
+    HAS_OCS       = _df_ok(df_P_L_OCS,             "df_P_L_OCS")
+    HAS_FEUIL     = _df_ok(df_high_variance_feuil,  "df_high_variance_feuil")
+    HAS_RELIEF_KD = _df_ok(df_Relief_KD,            "df_Relief_KD")
+    HAS_ITP       = _df_ok(df_itp,                  "df_itp")
+    HAS_NANO      = _df_ok(df_nano_hfm,             "df_nano_hfm")
+
+    HAS_FILE_HQ_ITEM = _file_ok(file_HQ_Item,                    "HQ Item file")
+    HAS_FILE_OSP     = _file_ok(file_path_OSP,                   "OSP file")
+    HAS_FILE_PL      = _file_ok(file_path_P_L,                   "P&L file")
+    HAS_FILE_TGK     = _file_ok(file_paths_OSP_TGK,              "OSP TGK file")
+    HAS_FILE_HLV     = _file_ok(file_paths_High_Level_Variance,  "High_Level_Variance file")
+    HAS_FILE_KD      = _file_ok(file_paths_Relief_KD,            "Relief KD file")
+    HAS_FILE_PP      = _file_ok(file_paths_Purchase_Price,       "Purchase Price file")
+    HAS_FILE_UP      = _file_ok(file_paths_UP_Calc,              "UP Calc file")
+    HAS_FILE_NANO    = _file_ok(file_paths_NANO_HFM,             "NANO HFM file")
+    HAS_FILE_ITP     = _file_ok(file_paths_ITP,                  "ITP file")
+    HAS_TMPL_MAN     = _file_ok(file_path_Template_man,          "Template_man file")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 1  –  COLUMN INDICES  (all int)
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 1: resolving column indices")
+
+    col_ROP_NE   = _safe_col_short(df_P_L_ROP_NE,  month_number, "df_P_L_ROP_NE")  if HAS_ROP_NE  else 0
+    col_PL_PL    = _safe_col_short(df_P_L_PL,       month_number, "df_P_L_PL")      if HAS_PL_PL   else 0
+    col_New_KPI  = _safe_col_short(df_P_L_New_KPI,  month_number, "df_P_L_New_KPI") if HAS_NEW_KPI else 0
+    col_MZ_conso = _safe_col_short(df_MZ_conso,     month_number, "df_MZ_conso")    if HAS_MZ      else 0
+    col_Reclass  = _safe_col_short(df_P_L_Reclass,  month_number, "df_P_L_Reclass") if HAS_RECLASS else 0
+    col_Relief   = _int(4 + adj)
+
+    col_r_and_d  = _safe_col_long(df_r_and_d,   month_number, "df_r_and_d")   if HAS_R_AND_D  else 0
+    col_hq       = _safe_col_long(df_hQ_items,  month_number, "df_hQ_items")  if HAS_HQ_ITEMS else 0
+    col_hq_tgt   = _safe_col_long(df_P_L_HQ,    month_number, "df_P_L_HQ")   if HAS_HQ       else 0
+    col_mccp     = _safe_col_long(df_P_L_MCCP,  month_number, "df_P_L_MCCP") if HAS_MCCP     else 0
+    col_ocp      = _safe_col_long(df_P_L_OCS,   month_number, "df_P_L_OCS")  if HAS_OCS      else 0
+
+    col_osp_tgk   = _int(1 + adj)
+    col_PL_write  = _int(col_PL_PL  + 1)
+    col_KPI_write = _int(col_New_KPI + 1)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 2  –  ROW INDICES
+    #  Every lookup goes through _row_from_dict() → guaranteed int.
+    #  Every tuple unpack goes through _safe_find_fmi_* → guaranteed ints.
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 2: resolving row indices")
+
+    # ── ROP NE ────────────────────────────────────────────────────────────────
+    row_map = _safe_find_row_numbers(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _r(k): return _row_from_dict(row_map, k)
+
+    row_nissan_retail   = _r("nissanretailvolume")
+    row_infiniti_retail = _r("infinitiretailvolume")
+    row_datsun_retail   = _r("datsunretailvolume")
+    row_tiv             = _r("tiv")
+    row_ms_nissan       = _r("marketshare-nissan")
+    row_ms_infiniti     = _r("marketshare-infiniti")
+    row_ms_datsun       = _r("marketshare-datsun")
+    row_opening_stock   = _r("openingstock")
+    row_nmuk            = _r("nmuk")
+    row_nmisa           = _r("nmisa")
+    row_nmgr            = _r("nmgr")
+    row_purchase_vol    = _r("purchasevolume")
+    row_total_in        = _r("totalin")
+    row_ew_nissan       = _r("europeanwholesalevolume-nissan")
+    row_ew_infiniti     = _r("europeanwholesalevolume-infiniti")
+    row_ew_datsun       = _r("europeanwholesalevolume-datsun")
+    row_exp_nissan      = _r("exportvolumenissan")
+    row_exp_infiniti    = _r("exportvolume-infiniti")
+    row_renault_trucks  = _r("renaulttrucks")
+    row_daimler         = _r("daimler")
+    row_renault         = _r("renault")
+    row_gtr_idg         = _r("gtr[idg]")
+    row_captives        = _r("captives")
+    row_scope_adj       = _r("scopeadjustment")
+    row_closing_stock   = _r("closingstock")
+
+    # ── Turnover ──────────────────────────────────────────────────────────────
+    t2 = _safe_search_turnover(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _t(k): return _row_from_dict(t2, k)
+
+    row_nissan_nv   = _t("nissan nv")
+    row_nissan_bb   = _t("nissan bb")
+    row_infiniti_nv = _t("infiniti nv")
+    row_infiniti_bb = _t("infiniti bb")
+    row_datsun_nv   = _t("datsun nv")
+    row_datsun_bb   = _t("datsun bb")
+    row_nissan_uc   = _t("nissan used cars")
+    row_infiniti_uc = _t("infiniti used cars")
+    row_nissan_as   = _t("nissan after sales")
+    row_infiniti_as = _t("infiniti after sales")
+    row_datsun_as   = _t("datsun after sales")
+    row_exp_nis_t   = _t("export nissan")
+    row_exp_inf_t   = _t("export infiniti")
+
+    # ── FMI (all return int tuples) ───────────────────────────────────────────
+    (fmi_nis_nv, trn_nis_nv, cos_nis_nv, vme_nis_nv,
+     fmi_dat_nv, trn_dat_nv, cos_dat_nv, vme_dat_nv,
+     fmi_inf_nv, trn_inf_nv, cos_inf_nv, vme_inf_nv,
+     fmi_tot_nv, trn_tot_nv, cos_tot_nv, vme_tot_nv,
+     ) = _safe_find_fmi_nv(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*16
+
+    (fmi_nis_uc, trn_nis_uc, cos_nis_uc, vme_nis_uc,
+     fmi_dat_uc, trn_dat_uc, cos_dat_uc, vme_dat_uc,
+     fmi_tot_uc, trn_tot_uc, cos_tot_uc, vme_tot_uc,
+     ) = _safe_find_fmi_uc(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*12
+
+    (fmi_nis_as, trn_nis_as, cos_nis_as, vme_nis_as,
+     fmi_dat_as, trn_dat_as, cos_dat_as, vme_dat_as,
+     fmi_inf_as, trn_inf_as, cos_inf_as, vme_inf_as,
+     fmi_tot_as, trn_tot_as, cos_tot_as, vme_tot_as,
+     ) = _safe_find_fmi_as(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*16
+
+    (fmi_nis_ex, trn_nis_ex, cos_nis_ex, vme_nis_ex,
+     fmi_dat_ex, trn_dat_ex, cos_dat_ex, vme_dat_ex,
+     fmi_inf_ex, trn_inf_ex, cos_inf_ex, vme_inf_ex,
+     fmi_tot_ex, trn_tot_ex, cos_tot_ex, vme_tot_ex,
+     ) = _safe_find_fmi_export(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*16
+
+    # ── OMP ───────────────────────────────────────────────────────────────────
+    omp = _safe_omp(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _omp(k): return _row_from_dict(omp, k)
+    row_x83_rop       = _omp("x83 sales to renault")
+    row_f91r_rop      = _omp("f91r sales to renault trucks")
+    row_pp_inter_rop  = _omp("production parts sales to inter-companies")
+    row_cant_rop      = _omp("cantabria sales to third party")
+    row_parts_ren_rop = _omp("parts sales to renault")
+    row_bat_oth_rop   = _omp("battery plant other costs")
+    row_scraps_rop    = _omp("scraps sales")
+    row_pensions_rop  = _omp("pensions")
+    row_others_rop    = _omp("others")
+
+    # ── Manufacturing ─────────────────────────────────────────────────────────
+    mfg = _safe_manufacturing(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _mfg(k): return _row_from_dict(mfg, k)
+    row_materials      = _mfg("materials costs")
+    row_bo_reduct      = _mfg("b/o cost reduction")
+    row_renault_tp     = _mfg("renault tp")
+    row_ic_kd          = _mfg("intercompany parts / kd")
+    row_inbound_fr     = _mfg("inbound freight / insurance")
+    row_inbound_duty   = _mfg("inbound duty")
+    row_inhouse_dl     = _mfg("inhouse / direct labour")
+    row_bat_nmuk_mfg   = _mfg("battery (nmuk)")
+    row_events         = _mfg("events")
+    row_oth_adj_mfg    = _mfg("other adjustments")
+    row_others_mfg     = _mfg("others")
+    row_core_fixed     = _mfg("core fixed")
+    row_pic_nissan     = _mfg("pic (nissan)")
+    row_regional_cost  = _mfg("regional cost")
+    row_vend_tool      = _mfg("vendor tooling depreciation")
+    row_projects       = _mfg("projects")
+    row_nesas          = _mfg("nesas/nisa manufacturing")
+    row_bat_fixed      = _mfg("battery fixed")
+    row_inf_fixed_gd1a = _mfg("infiniti fixed cost (gd1a)")
+    row_maint_dd       = _mfg("maintenance of existing models (d&d)")
+    row_gd1a_shift     = _mfg("gd1a top position shift to icp")
+    row_supp_claims    = _mfg("supplier claims & other")
+
+    # ── G&A financial indices (int lists) ─────────────────────────────────────
+    (idx_labour, idx_is, idx_dep, idx_prov, idx_overhead) = (
+        _safe_financial_indices(df_P_L_ROP_NE, "df_P_L_ROP_NE")
+        if HAS_ROP_NE else ([0],[0],[0],[0],[0])
     )
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    process_btn = st.button("⚙️ Generate Mapping", key="process_btn")
+    # ── OEM (int lists) ───────────────────────────────────────────────────────
+    (oem_trn, oem_std, oem_mgn, oem_veh,
+     oem_log, oem_roy, oem_oth, oem_eop) = (
+        _safe_oem_terms(df_P_L_ROP_NE, "df_P_L_ROP_NE")
+        if HAS_ROP_NE else ([0],[0],[0],[0],[0],[0],[0],[0])
+    )
 
-    if process_btn and uploaded_monthly is not None:
-        try:
-            import io
+    # ── OCS (int list) ────────────────────────────────────────────────────────
+    ocs_row = _safe_ocs_terms(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else [0]
 
-            progress_bar = st.progress(0, text="Initialising…")
-            time.sleep(0.1)
-            progress_bar.progress(10, text="Reading Excel file…")
+    # ── R&D (ROP NE) ──────────────────────────────────────────────────────────
+    rd_rows = _safe_rd_terms(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    row_func_rd    = _row_from_dict(rd_rows, "functional r&d")
+    row_nonfunc_rd = _row_from_dict(rd_rows, "non functional r&d")
 
-            raw = pd.read_excel(io.BytesIO(uploaded_monthly.read()), engine="openpyxl")
-            progress_bar.progress(30, text="Normalising headers…")
-            df = normalize_df_headers(raw)
-            month_cols = get_month_cols(df)
+    # ── R&D File ──────────────────────────────────────────────────────────────
+    rd_file = _safe_rd_file(df_r_and_d, "df_r_and_d") if HAS_R_AND_D else {}
+    def _rdf(k): return _row_from_dict(rd_file, k)
+    row_func_rd_rev  = _rdf("functional r&d revenue")
+    row_func_rd_cost = _rdf("functional r&d cost")
+    row_nf_rd_rev    = _rdf("non functional r&d revenue")
+    row_nf_rd_cost   = _rdf("non functional r&d cost")
 
-            if not month_cols:
-                progress_bar.empty()
-                st.error("No month columns detected. Ensure columns like '1-Apr', '2-May' exist.")
-            else:
-                progress_bar.progress(50, text="Computing MTD / YTD…")
-                fy_index = 1
-                df2, _, target_col = compute_mtd_ytd(df, fy_index)
+    # ── MZ conso ──────────────────────────────────────────────────────────────
+    mz = _safe_mz_sheet(df_MZ_conso, "df_MZ_conso") if HAS_MZ else {}
+    def _mz(k): return _row_from_dict(mz, k)
+    row_mz_x83      = _mz("x83 sales to renault")
+    row_mz_trucks   = _mz("sales to renault trucks")
+    row_mz_pp_inter = _mz("production parts sales to inter-companies")
+    row_mz_cant     = _mz("cantabria sales to third party")
+    row_mz_h4bu     = _mz("parts sales to renault (h4bu camshaft)")
+    row_mz_scrap    = _mz("scrap sales")
+    row_mz_bat      = _mz("battery plant to")
+    row_mz_others   = _mz("others")
 
-                progress_bar.progress(65, text="Loading mapping file…")
-                mapping_df = None
-                if os.path.exists(MAPPING_PATH):
-                    try:
-                        mapping_df = pd.read_excel(MAPPING_PATH, engine="openpyxl")
-                    except:
-                        pass
+    # ── HQ items ─────────────────────────────────────────────────────────────
+    tp_list  = _safe_transfer_price(df_hQ_items, "df_hQ_items") if HAS_HQ_ITEMS else [0]
+    tp_base  = _int(tp_list[0]) if tp_list else 0
 
-                progress_bar.progress(80, text="Merging mappings…")
-                if mapping_df is not None:
-                    req1 = {"Entity_desc", "Region", "Entity", "Market"}
-                    req2 = {"CostCat description", "OH/LC"}
-                    if req1.issubset(mapping_df.columns) and req2.issubset(mapping_df.columns):
-                        df_final = df2.merge(
-                            mapping_df[["Entity_desc","Region","Entity","Market"]],
-                            on="Entity_desc", how="left"
-                        ).merge(
-                            mapping_df[["CostCat description","OH/LC"]],
-                            on="CostCat description", how="left"
-                        )
-                    else:
-                        df_final = df2.copy()
-                        st.warning("Mapping columns mismatch — proceeding without mapping.")
-                else:
-                    df_final = df2.copy()
+    tax_list = _safe_tax(df_P_L_HQ, "df_P_L_HQ") if HAS_HQ else [0]
+    op_list  = _safe_op (df_P_L_HQ, "df_P_L_HQ") if HAS_HQ else [0]
+    tax_base = _int(tax_list[0]) if tax_list else 0
+    op_base  = _int(op_list[0])  if op_list  else 0
 
-                progress_bar.progress(100, text="Done ✓")
-                time.sleep(0.4)
-                progress_bar.empty()
+    # ── Reclass ───────────────────────────────────────────────────────────────
+    reclass_row = _int(_safe_reclass(df_P_L_Reclass, "df_P_L_Reclass")) if HAS_RECLASS else 0
 
-                st.session_state.final_db = df_final
-                st.success(f"✅ Mapping generated — {len(df_final):,} rows × {len(df_final.columns)} columns")
-                st.toast("Switch to the 📈 Variance Analysis tab to begin analysis.", icon="➡️")
+    # ── Relief rows (all int via _row_from_dict) ──────────────────────────────
+    rel = _safe_relief(df_P_L_Relief, "df_P_L_Relief") if HAS_RELIEF else {}
+    def _rel(k): return _row_from_dict(rel, k)
 
-        except Exception as e:
-            st.error(f"Mapping error: {e}")
+    row_rel_recall    = _rel("recall service/campaigns")
+    row_rel_kd_nmuk   = _rel("kd itp (nmuk)")
+    row_rel_kd_nmisa  = _rel("kd itp (nmisa)")
+    row_rel_kd_nmgr   = _rel("kd itp (nmgr)")
+    row_rel_conn      = _rel("connectivity")
+    row_rel_itp_nis   = _rel("itp cbu nissan")
+    row_rel_itp_inf   = _rel("itp cbu infiniti")
+    row_rel_iln_nmuk  = _rel("iln export (nmuk)")
+    row_rel_iln_nmisa = _rel("iln export (nmisa)")
+    row_rel_err_mz    = _rel("error correction in mz (?)")
+    row_rel_mz_imp    = _rel("mz impairment")
+    row_rel_ga_imp    = _rel("g&a impairment")
+    row_rel_cev       = _rel("compact ev/vt impairment")
+    row_rel_bat_nmuk  = _rel("battery 40 kw itp ( nmuk )")
+    row_rel_bat_nmisa = _rel("battery 40 kw itp ( nmisa )")
+    row_rel_bat_cancel= _rel("battery cancelation")
+    row_rel_err_wd5   = _rel("error correction in mz (after wd5)")
+    row_rel_top_daim  = _rel("top daimler correction (after wd5)")
+    row_rel_inf_fmi   = _rel("infiniti fmi correction (after wd5)")
 
-    elif process_btn and uploaded_monthly is None:
-        st.warning("Please upload a monthly Excel file first.")
+    # ── OSP outside profit (int pairs) ────────────────────────────────────────
+    row_osp1, col_osp1 = (
+        _safe_outside_profit(df_OSP, month_number, "df_OSP")
+        if HAS_OSP else (0, 0)
+    )
+    row_osp2, col_osp2 = (
+        _safe_outside_profit_2(df_OSP, month_number, "df_OSP")
+        if HAS_OSP else (0, 0)
+    )
 
-    if st.session_state.final_db is not None:
-        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-        st.markdown('<p class="va-section-label">📋 Preview (top 100 rows)</p>', unsafe_allow_html=True)
-        with st.expander("Show generated Mapping", expanded=False):
-            st.dataframe(st.session_state.final_db.head(100), use_container_width=True, height=280)
+    # ── Feuil1 (int pair) ─────────────────────────────────────────────────────
+    row_feuil, col_feuil_base = (
+        _safe_feuil(df_high_variance_feuil, month_number, "df_high_variance_feuil")
+        if HAS_FEUIL else (0, 0)
+    )
+    col_feuil = _int(col_feuil_base + 1 + adj) if col_feuil_base else 0
 
-        col_dl1, col_dl2 = st.columns([1, 1])
-        with col_dl1:
-            import io
-            csv_buf = io.StringIO()
-            st.session_state.final_db.to_csv(csv_buf, index=False)
-            st.download_button("📥 Download CSV", csv_buf.getvalue().encode(), "mapping_output.csv", "text/csv")
-        with col_dl2:
-            xl_buf = io.BytesIO()
-            with pd.ExcelWriter(xl_buf, engine="openpyxl") as w:
-                st.session_state.final_db.to_excel(w, index=False, sheet_name="mapping_output")
-            st.download_button("📥 Download Excel", xl_buf.getvalue(), "mapping_output.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # ── Relief KD (int list) ──────────────────────────────────────────────────
+    kd_cols = (
+        _safe_relief_kd_cols(df_Relief_KD, month_number, "df_Relief_KD")
+        if HAS_RELIEF_KD else [0, 0]
+    )
 
-# ══════════════════════════════════════════════
-# TAB 2 — VARIANCE ANALYSIS  (UNCHANGED)
-# ══════════════════════════════════════════════
-with tab2:
+    # ── ITP (int lists) ───────────────────────────────────────────────────────
+    itp_rows = _safe_itp_rows(df_itp, "df_itp")       if HAS_ITP else [0]
+    itp_cols = _safe_itp_cols(df_itp, month_number, "df_itp") if HAS_ITP else [0, 0]
 
-    st.markdown('<p class="va-section-label">🗄️ Data Source</p>', unsafe_allow_html=True)
+    # ── NANO HFM (int pair) ───────────────────────────────────────────────────
+    row_nano, col_nano = (
+        _safe_nano(df_nano_hfm, month_number, "df_nano_hfm")
+        if HAS_NANO else (0, 0)
+    )
 
-    src_mode = st.selectbox(
-        "Select data source mode",
+    # ── Energy (int) ──────────────────────────────────────────────────────────
+    energy_list = _safe_energy(df_hQ_items, "df_hQ_items") if HAS_HQ_ITEMS else [0]
+    energy_row  = _int(energy_list[0]) if energy_list else 0
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 3  –  FORMULA STRINGS
+    #  All row/col values are now guaranteed ints.
+    #  _safe_gen_formula short-circuits on row==0 or col==0.
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 3: building formula strings")
+
+    SH = "ROP NE (Tagetik)"
+
+    # ── Source-DF-bound formula builders ──────────────────────────────────────
+
+    def fp(row: int) -> str:
+        """ROP NE → skips if absent or col/row == 0."""
+        if not HAS_ROP_NE or not col_ROP_NE:
+            return Z
+        return _safe_gen_formula(_int(row), col_ROP_NE, SH)
+
+    def fmz(row: int) -> str:
+        if not HAS_MZ or not col_MZ_conso: return Z
+        return _safe_gen_formula(_int(row), col_MZ_conso, "MZ conso TGK")
+
+    def frd(row: int) -> str:
+        if not HAS_R_AND_D or not col_r_and_d: return Z
+        return _safe_gen_formula(_int(row), col_r_and_d, "R&D")
+
+    def focp(row: int) -> str:
+        if not HAS_OCS or not col_ocp: return Z
+        return _safe_gen_formula(_int(row), col_ocp, "OCS details")
+
+    def fmccp(row: int) -> str:
+        if not HAS_MCCP or not col_mccp: return Z
+        return _safe_gen_formula(_int(row), col_mccp, "MCPP")
+
+    def frel(row: int) -> str:
+        """Relief sheet – row MUST be int > 0."""
+        row = _int(row)
+        if not HAS_RELIEF or not row: return Z
+        return _safe_gen_formula(row, col_Relief, "Relief")
+
+    def freclass(row: int) -> str:
+        row = _int(row)
+        if not HAS_RECLASS or not row or not col_Reclass: return Z
+        return _safe_gen_formula(row, col_Reclass, "Reclass")
+
+    def fhq_tgt(row: int) -> str:
+        row = _int(row)
+        if not HAS_HQ or not col_hq_tgt or not row: return Z
+        return _safe_gen_formula(row, col_hq_tgt, "HQ Tagetik")
+
+    def fhq_item(offset: int) -> str:
+        offset = _int(offset)
+        row = _int(tp_base) + offset
+        if not HAS_HQ_ITEMS or not col_hq or not tp_base or not HAS_FILE_HQ_ITEM or not row:
+            return Z
+        return _safe_gen_formula(row, col_hq, "Sheet1", file_HQ_Item)
+
+    # ── HQ items formula block ────────────────────────────────────────────────
+    formula_hq_list = [fhq_item(o) for o in [5,3,6,10,18,21,22,26,4,34,1,20]]
+    valid_hq = [x[1:] for x in formula_hq_list if x != Z]
+    formula_hq_sum = f"=({' + '.join(valid_hq)}) / 1000000" if valid_hq else Z
+
+    # ── HQ Tagetik tax / operating profit ─────────────────────────────────────
+    def ftax(offset): return fhq_tgt(_int(tax_base) + _int(offset)) if tax_base else Z
+    def fop (offset): return fhq_tgt(_int(op_base)  + _int(offset)) if op_base  else Z
+
+    tax_parts = [x[1:] for x in [
+        ftax(3),ftax(1),ftax(20),ftax(4),ftax(22),ftax(6),
+        ftax(7),ftax(16),ftax(18),
+        fop(0),fop(1),fop(2),fop(3),
+    ] if x != Z]
+    formula_hq_tax_sum = f"=({' + '.join(tax_parts)}) / 1000000" if tax_parts else Z
+
+    # ── Template extract helper (gated on HAS_TMPL_MAN) ───────────────────────
+    def _ex(sheet, row, col, label=""):
+        row, col = _int(row), _int(col)
+        return (_safe_extract_formula(file_path_Template_man, sheet, row, col, label)
+                if HAS_TMPL_MAN else Z)
+
+    SH_TGT = "HQ Tagetik"
+    SH_REL = "New KPI Actual"
+
+    hq_ex_1 = _ex(SH_TGT, 46, col_hq_tgt, "hq_ex_1")
+    hq_ex_2 = _ex(SH_TGT, 47, col_hq_tgt, "hq_ex_2")
+    hq_ex_3 = _ex(SH_TGT, 48, col_hq_tgt, "hq_ex_3")
+    hq_ex_4 = _ex(SH_TGT, 49, col_hq_tgt, "hq_ex_4")
+
+    # ── NANO / UP calc ────────────────────────────────────────────────────────
+    _nano_raw = (
+        _safe_gen_formula(row_nano, col_nano, "Actual", file_paths_NANO_HFM)
+        if (HAS_NANO and HAS_FILE_NANO and row_nano and col_nano) else Z
+    )
+    f_nano = f"={_nano_raw[1:]}*10^3" if _nano_raw != Z else Z
+
+    _up_raw = _safe_gen_formula(18, 25, "UP_Calculation", file_paths_UP_Calc) if HAS_FILE_UP else Z
+    f_up    = f"={_up_raw[1:]}*10^6" if _up_raw != Z else Z
+
+    # energy_row is already int; safe arithmetic
+    _energy_offset = energy_row - tp_base
+    f_energy = fhq_item(_energy_offset) if (energy_row and tp_base) else Z
+
+    # ── OSP formulas ──────────────────────────────────────────────────────────
+    _osp1_row = _int(row_osp1) - 5 if (_int(row_osp1) > 5) else 0
+    _osp2_row = _int(row_osp2) - 5 if (_int(row_osp2) > 5) else 0
+
+    f_osp1_raw = (
+        _safe_gen_formula(_osp1_row, _int(col_osp1), "Master")
+        if (HAS_OSP and _osp1_row and col_osp1) else Z
+    )
+    f_osp2_raw = (
+        _safe_gen_formula(_osp2_row, _int(col_osp2), "Master")
+        if (HAS_OSP and _osp2_row and col_osp2) else Z
+    )
+    f_osp2 = f"=-{f_osp2_raw[1:]}" if f_osp2_raw != Z else Z
+
+    f_ex_249  = _ex(SH_REL, 249, _int(col_KPI_write) - 1, "f_ex_249")
+    f_249     = _safe_gen_formula_249(month_number, file_path_OSP) if HAS_FILE_OSP else Z
+    f_sum249  = _compound(f_249, "-", f_ex_249)
+
+    f_osp_ex1 = _ex(SH_REL, 239, _int(col_KPI_write) - 1, "f_osp_ex1")
+    f_osp_sum = _compound(f_osp1_raw, "-", f_osp_ex1)
+
+    # ── OCP (OCS details) ─────────────────────────────────────────────────────
+    f_ocp1    = focp(74)
+    f_ocp2    = focp(81)
+    f_ocp_ex1 = _ex(SH_REL, 482, _int(col_KPI_write) - 1, "ocp_ex1")
+    f_ocp_ex2 = _ex(SH_REL, 500, _int(col_KPI_write) - 1, "ocp_ex2")
+
+    _ocp_ab = " + ".join(x[1:] for x in [f_ocp1, f_ocp2] if x != Z)
+    f_sum_ocp1 = (f"={f_ocp_ex1[1:]}-({_ocp_ab})/10^6" if (f_ocp_ex1 != Z and _ocp_ab)
+                  else f_ocp_ex1 if f_ocp_ex1 != Z else Z)
+    f_sum_ocp2 = (f"={f_ocp_ex2[1:]}+({_ocp_ab})/10^6" if (f_ocp_ex2 != Z and _ocp_ab)
+                  else f_ocp_ex2 if f_ocp_ex2 != Z else Z)
+
+    # ── OSP TGK ───────────────────────────────────────────────────────────────
+    def _tgk(abs_row: int) -> str:
+        r = _int(abs_row) - 2
+        return (
+            _safe_gen_formula(r, col_osp_tgk, "Summary", file_paths_OSP_TGK)
+            if (HAS_FILE_TGK and r > 0 and col_osp_tgk) else Z
+        )
+    f_tgk1 = _tgk(6);  f_tgk2 = _tgk(13)
+    f_tgk3 = _tgk(20); f_tgk4 = _tgk(27)
+
+    # ── High Level Variance / Feuil1 ─────────────────────────────────────────
+    f_relief_1 = (
+        _safe_gen_formula(row_feuil, col_feuil, "Feuil1", file_paths_High_Level_Variance)
+        if (HAS_FEUIL and HAS_FILE_HLV and row_feuil and col_feuil) else Z
+    )
+
+    # ── Relief KD ─────────────────────────────────────────────────────────────
+    def _kd(abs_row: int, col_idx: int) -> str:
+        col = _int(kd_cols[col_idx]) if len(kd_cols) > col_idx else 0
+        return (
+            _safe_gen_formula(_int(abs_row), col, "vs 2+10", file_paths_Relief_KD)
+            if (HAS_RELIEF_KD and HAS_FILE_KD and abs_row and col) else Z
+        )
+
+    f_relief_2_raw = _kd(45, 0);  f_relief_3_raw = _kd(30, 0)
+    f_relief_4_raw = _kd(15, 0);  f_relief_5_raw = _kd(45, 1)
+    f_relief_6_raw = _kd(30, 1)
+
+    f_ex_rel1 = _ex("Relief", 80, col_Relief, "relief_ex_row80")
+    f_ex_rel5 = _ex("Relief", 87, col_Relief, "relief_ex_row87")
+
+    if month_number == 4:
+        f_relief_12 = f"={connectivity_var}"
+    else:
+        f_relief_12 = (
+            f"=({connectivity_var})-{f_ex_rel5[1:]}"
+            if f_ex_rel5 != Z else f"={connectivity_var}"
+        )
+
+    def _neg_div(raw: str, ex: str = Z, divisor: int = 1000) -> str:
+        if raw == Z: return Z
+        base = f"=-({raw[1:]}){f'/{divisor}'}"
+        return f"{base}-{ex[1:]}" if ex != Z else base
+
+    f_relief_2 = _neg_div(f_relief_2_raw, f_ex_rel1)
+    f_relief_3 = _neg_div(f_relief_3_raw)
+    f_relief_4 = _neg_div(f_relief_4_raw)
+    f_relief_5 = _neg_div(f_relief_5_raw)
+    f_relief_6 = _neg_div(f_relief_6_raw)
+
+    # ── ITP / Purchase Price ──────────────────────────────────────────────────
+    _itp_r = _int(itp_rows[0]) if itp_rows else 0
+    _itp_c = _int(itp_cols[0]) if itp_cols else 0
+    f_relief_9 = (
+        _safe_gen_formula(_itp_r, _itp_c, "BP25", file_paths_ITP)
+        if (HAS_ITP and HAS_FILE_ITP and _itp_r and _itp_c) else Z
+    )
+
+    _pp_raw = _safe_gen_formula(14, 10, "Summary pivot", file_paths_Purchase_Price) if HAS_FILE_PP else Z
+    f_relief_10 = f"=-({_pp_raw[1:]})/10^6" if _pp_raw != Z else Z
+
+    # ── UED ───────────────────────────────────────────────────────────────────
+    formula_ued_raw = _safe_extract_value_formula(file_path_P_L, month_number) if HAS_FILE_PL else Z
+    f_ued_tmpl = _ex("P&L Actual", 340, _int(col_PL_write) - 1, "UED_template")
+    f_sum_UED  = (
+        f"=({formula_ued_raw[1:]}-{f_ued_tmpl[1:]})/1000"
+        if (formula_ued_raw != Z and f_ued_tmpl != Z) else Z
+    )
+
+    # ── MCCP ──────────────────────────────────────────────────────────────────
+    f_mccp1 = fmccp(208)
+    f_mccp2 = fmccp(322)
+
+    # ── KPI Relief formulas ───────────────────────────────────────────────────
+    # All row_rel_* are ints; arithmetic is safe.
+    f_kpi_1   = frel(row_rel_mz_imp)
+    f_kpi_2   = frel(row_rel_ga_imp)
+    f_kpi_3   = freclass(reclass_row)
+    f_kpi_4   = frel(row_rel_iln_nmuk)
+    f_kpi_4_1 = frel(_int(row_rel_iln_nmuk) + 1) if row_rel_iln_nmuk else Z
+    f_kpi_5   = frel(row_rel_itp_inf)
+    f_kpi_6   = frel(row_rel_err_mz)
+    f_kpi_7   = frel(row_rel_kd_nmuk)
+    f_kpi_8   = frel(row_rel_kd_nmgr)
+    f_kpi_9   = frel(row_rel_kd_nmisa)
+    f_kpi_10  = frel(row_rel_bat_nmuk)
+    f_kpi_11  = frel(row_rel_bat_nmisa)
+    f_kpi_111 = frel(_int(row_rel_ga_imp) + 1) if row_rel_ga_imp else Z
+    f_kpi_12  = frel(row_rel_cev)
+    f_kpi_13  = frel(row_rel_itp_nis)
+    f_kpi_14  = frel(row_rel_bat_cancel)
+    f_kpi_15  = frel(row_rel_err_wd5)
+    f_kpi_16  = frel(row_rel_top_daim)
+    f_kpi_17  = frel(row_rel_inf_fmi)
+    f_kpi_18  = frel(row_rel_recall)
+    f_kpi_conn= frel(row_rel_conn)
+
+    f_sum_kpi_1 = _join_sum(f_kpi_2, f_kpi_3)
+    f_sum_kpi_2 = _join_sum(f_kpi_4, f_kpi_4_1)
+    f_sum_kpi_3 = _join_sum(f_kpi_7, f_kpi_8, f_kpi_9, f_kpi_10, f_kpi_11)
+    f_sum_kpi_4 = _join_sum(f_kpi_conn, f_kpi_13)
+    f_sum_kpi_5 = _join_sum(f_kpi_14, f_kpi_15, f_kpi_16, f_kpi_17)
+
+    # ── Manufacturing other-adjustments ───────────────────────────────────────
+    f_sum_mfg_oth = _join_sum(fp(row_oth_adj_mfg), fp(row_others_mfg))
+
+    # ── OEM brand summations ──────────────────────────────────────────────────
+    def _oem_sum(i: int) -> str:
+        a = fp(_int(oem_std[i])) if (oem_std and len(oem_std) > i and oem_std[i]) else Z
+        b = fp(_int(oem_oth[i])) if (oem_oth and len(oem_oth) > i and oem_oth[i]) else Z
+        return _join_sum(a, b)
+
+    # ── G&A index helper ──────────────────────────────────────────────────────
+    def _idx(arr, i) -> str:
+        if not HAS_ROP_NE or not arr or len(arr) <= i: return Z
+        return fp(_int(arr[i])) if arr[i] else Z
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 4  –  CELL UPDATE TABLES
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 4: building cell update tables")
+
+    # All arithmetic here uses variables already guaranteed to be int.
+    def _c(col0): return _int(col0) + 1   # 0-based → 1-based
+
+    # ── Reclass ───────────────────────────────────────────────────────────────
+    col_rel_w = _c(col_Reclass + 1)
+    upd_reclass = (
         [
-            "Use Generated Output (from Target Mapping)",
-            "Upload Master DB (single file with both scenarios)",
-            "Upload Two Files (A & B — assign scenario labels)"
-        ],
-        key="src_mode"
+            (reclass_row - 2, col_rel_w, Var_Converter),
+            (reclass_row + 1, col_rel_w, var_converter_bJPY),
+            (reclass_row + 2, col_rel_w, var_converter_mEUR),
+        ]
+        if (HAS_RECLASS and reclass_row) else []
     )
 
-    master_df_loaded = None
+    # ── Relief ────────────────────────────────────────────────────────────────
+    col_rel_wr = _c(col_Relief + 1)
+    upd_relief = [
+        (78,  col_rel_wr, ePWR_var),
+        (75,  col_rel_wr, f_relief_1),
+        (80,  col_rel_wr, f_relief_2),
+        (81,  col_rel_wr, f_relief_3),
+        (82,  col_rel_wr, f_relief_4),
+        (83,  col_rel_wr, f_relief_5),
+        (84,  col_rel_wr, f_relief_6),
+        (87,  col_rel_wr, f_relief_12),
+        (95,  col_rel_wr, f_relief_9),
+        (96,  col_rel_wr, f_relief_10),
+    ]
 
-    if src_mode == "Use Generated Output (from Target Mapping)":
-        if st.session_state.final_db is not None:
-            master_df_loaded = normalize_df_headers(st.session_state.final_db)
-            st.success(f"✅ Using mapping output — {len(master_df_loaded):,} rows")
-        else:
-            st.warning("No mapping output found. Go to **Target Mapping** tab and process a file first.")
-
-    elif src_mode == "Upload Master DB (single file with both scenarios)":
-        upl_master = st.file_uploader("Upload Master DB (.xlsx)", type=["xlsx","xls"], key="upl_master")
-        if upl_master:
-            import io
-            master_df_loaded = normalize_df_headers(pd.read_excel(io.BytesIO(upl_master.read()), engine="openpyxl"))
-            st.success(f"✅ Loaded — {len(master_df_loaded):,} rows × {len(master_df_loaded.columns)} columns")
-
-    else:
-        col_a_up, col_b_up = st.columns(2)
-        with col_a_up:
-            upl_a = st.file_uploader("File for Scenario A (.xlsx)", type=["xlsx","xls"], key="upl_a")
-            label_a = st.text_input("Scenario A label", "Scenario_A", key="label_a")
-        with col_b_up:
-            upl_b = st.file_uploader("File for Scenario B (.xlsx)", type=["xlsx","xls"], key="upl_b")
-            label_b = st.text_input("Scenario B label", "Scenario_B", key="label_b")
-
-        if upl_a and upl_b:
-            import io
-            dfa = normalize_df_headers(pd.read_excel(io.BytesIO(upl_a.read()), engine="openpyxl"))
-            dfb = normalize_df_headers(pd.read_excel(io.BytesIO(upl_b.read()), engine="openpyxl"))
-            dfa["Scenario"] = label_a.strip() or "Scenario_A"
-            dfb["Scenario"] = label_b.strip() or "Scenario_B"
-            common = list(set(dfa.columns) & set(dfb.columns))
-            master_df_loaded = pd.concat([dfa[common], dfb[common]], ignore_index=True)
-            st.success(f"✅ Combined — {len(master_df_loaded):,} rows")
-
-    if master_df_loaded is not None:
-        st.session_state.master_df = master_df_loaded
-
-    df_master = st.session_state.master_df
-
-    if df_master is None:
-        st.info("Load a data source above to begin variance analysis.")
-        st.stop()
-
-    with st.expander(f"📋 Preview data — {len(df_master):,} rows × {len(df_master.columns)} columns", expanded=False):
-        st.dataframe(df_master.head(50), use_container_width=True, height=220)
-
-    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-
-    month_cols_avail = get_month_cols(df_master)
-    period_cols = sorted(
-        set(month_cols_avail + [c for c in ["YTD", "MTD"] if c in df_master.columns]),
-        key=lambda c: (100 if c in ("YTD", "MTD") else 0, c)
+    # ── HQ Tagetik ────────────────────────────────────────────────────────────
+    col_hq_w = _c(col_hq_tgt + 1)
+    upd_hq = (
+        [
+            *[(9 + i, col_hq_w, fhq_item(i - 1)) for i in range(36)],
+            (46, col_hq_w, hq_ex_1), (47, col_hq_w, hq_ex_2),
+            (48, col_hq_w, hq_ex_3), (49, col_hq_w, hq_ex_4),
+            (52, col_hq_w, f_nano),
+            (54, col_hq_w, f_up),
+            (67, col_hq_w, f_energy),
+            (69, col_hq_w, cafe_penalty_var),
+        ]
+        if col_hq_tgt else []
     )
 
-    scenario_col_exists = "Scenario" in df_master.columns
-    if not scenario_col_exists:
-        st.error("Data must contain a **'Scenario'** column. Use 'Upload Two Files' mode or ensure your Master DB has a Scenario column.")
-        st.stop()
+    # ── P&L Actual ────────────────────────────────────────────────────────────
+    col_pl = _c(col_PL_write)
+    upd_pl = [
+        (5,  col_pl, fp(row_nissan_retail)),
+        (6,  col_pl, fp(row_infiniti_retail)),
+        (7,  col_pl, fp(row_datsun_retail)),
+        (9,  col_pl, fp(row_tiv)),
+        (10, col_pl, fp(row_ms_nissan)),
+        (11, col_pl, fp(row_ms_infiniti)),
+        (12, col_pl, fp(row_ms_datsun)),
+        (14, col_pl, fp(row_opening_stock)),
+        (15, col_pl, fp(row_nmuk)),
+        (16, col_pl, fp(row_nmisa)),
+        (17, col_pl, fp(row_nmgr)),
+        (19, col_pl, fp(row_purchase_vol)),
+        (20, col_pl, fp(row_total_in)),
+        (21, col_pl, fp(row_ew_nissan)),
+        (22, col_pl, fp(row_ew_infiniti)),
+        (23, col_pl, fp(row_ew_datsun)),
+        (25, col_pl, fp(row_exp_nissan)),
+        (26, col_pl, fp(row_exp_infiniti)),
+        (29, col_pl, fp(row_renault_trucks)),
+        (30, col_pl, fp(row_daimler)),
+        (31, col_pl, fp(row_renault)),
+        (32, col_pl, fp(row_gtr_idg)),
+        (34, col_pl, fp(row_captives)),
+        (36, col_pl, fp(row_scope_adj)),
+        (37, col_pl, fp(row_closing_stock)),
+        (10, 20, _safe_gen_formula(15, 18, SH) if HAS_ROP_NE else Z),
+        (11, 20, _safe_gen_formula(17, 18, SH) if HAS_ROP_NE else Z),
+        (12, 20, _safe_gen_formula(19, 18, SH) if HAS_ROP_NE else Z),
+        (39, col_pl, fp(row_nissan_nv)),   (40, col_pl, fp(row_nissan_bb)),
+        (42, col_pl, fp(row_infiniti_nv)), (43, col_pl, fp(row_infiniti_bb)),
+        (45, col_pl, fp(row_datsun_nv)),   (46, col_pl, fp(row_datsun_bb)),
+        (48, col_pl, fp(row_nissan_uc)),   (49, col_pl, fp(row_infiniti_uc)),
+        (52, col_pl, fp(row_nissan_as)),   (53, col_pl, fp(row_infiniti_as)),
+        (54, col_pl, fp(row_datsun_as)),
+        (57, col_pl, fp(row_exp_nis_t)),   (58, col_pl, fp(row_exp_inf_t)),
+        (60, col_pl, fmz(row_mz_x83)),    (61, col_pl, fmz(row_mz_trucks)),
+        (62, col_pl, fmz(row_mz_pp_inter)),(63, col_pl, fmz(row_mz_cant)),
+        (64, col_pl, fmz(row_mz_h4bu)),   (65, col_pl, fmz(row_mz_scrap)),
+        (66, col_pl, fmz(row_mz_bat)),    (69, col_pl, fmz(row_mz_others)),
+        (73, col_pl, fp(trn_nis_nv)), (74, col_pl, fp(cos_nis_nv)),
+        (76, col_pl, fp(vme_nis_nv)), (78, col_pl, fp(fmi_nis_nv)),
+        (81, col_pl, fp(trn_inf_nv)), (82, col_pl, fp(cos_inf_nv)),
+        (84, col_pl, fp(vme_inf_nv)), (86, col_pl, fp(fmi_inf_nv)),
+        (89, col_pl, fp(trn_dat_nv)), (90, col_pl, fp(cos_dat_nv)),
+        (92, col_pl, fp(vme_dat_nv)), (94, col_pl, fp(fmi_dat_nv)),
+        (105, col_pl, fp(trn_nis_uc)), (106, col_pl, fp(cos_nis_uc)),
+        (108, col_pl, fp(vme_nis_uc)), (110, col_pl, fp(fmi_nis_uc)),
+        (113, col_pl, fp(trn_dat_uc)), (114, col_pl, fp(cos_dat_uc)),
+        (116, col_pl, fp(vme_dat_uc)), (118, col_pl, fp(fmi_dat_uc)),
+        (137, col_pl, fp(trn_nis_as)), (138, col_pl, fp(cos_nis_as)),
+        (140, col_pl, fp(vme_nis_as)), (142, col_pl, fp(fmi_nis_as)),
+        (145, col_pl, fp(trn_inf_as)), (146, col_pl, fp(cos_inf_as)),
+        (148, col_pl, fp(vme_inf_as)), (150, col_pl, fp(fmi_inf_as)),
+        (153, col_pl, fp(trn_dat_as)), (154, col_pl, fp(cos_dat_as)),
+        (156, col_pl, fp(vme_dat_as)), (158, col_pl, fp(fmi_dat_as)),
+        (171, col_pl, fp(trn_nis_ex)), (172, col_pl, fp(cos_nis_ex)),
+        (174, col_pl, fp(vme_nis_ex)),
+        (178, col_pl, fp(trn_inf_ex)), (179, col_pl, fp(cos_inf_ex)),
+        (181, col_pl, fp(vme_inf_ex)), (183, col_pl, fp(fmi_inf_ex)),
+        (193, col_pl, fp(row_x83_rop)),       (194, col_pl, fp(row_f91r_rop)),
+        (195, col_pl, fp(row_pp_inter_rop)),  (196, col_pl, fp(row_cant_rop)),
+        (197, col_pl, fp(row_parts_ren_rop)), (198, col_pl, fp(row_bat_oth_rop)),
+        (199, col_pl, fp(row_scraps_rop)),    (200, col_pl, fp(row_pensions_rop)),
+        (203, col_pl, fp(row_others_rop)),
+        (206, col_pl, fp(row_materials)),    (207, col_pl, fp(row_bo_reduct)),
+        (208, col_pl, fp(row_renault_tp)),   (209, col_pl, fp(row_ic_kd)),
+        (210, col_pl, fp(row_inbound_fr)),   (211, col_pl, fp(row_inbound_duty)),
+        (212, col_pl, fp(row_inhouse_dl)),   (213, col_pl, fp(row_bat_nmuk_mfg)),
+        (217, col_pl, f_sum_mfg_oth),
+        (219, col_pl, fp(row_core_fixed)),   (220, col_pl, fp(row_pic_nissan)),
+        (221, col_pl, fp(row_regional_cost)),(222, col_pl, fp(row_vend_tool)),
+        (223, col_pl, fp(row_projects)),     (224, col_pl, fp(row_nesas)),
+        (225, col_pl, fp(row_bat_fixed)),    (226, col_pl, fp(row_inf_fixed_gd1a)),
+        (227, col_pl, fp(row_maint_dd)),     (228, col_pl, fp(row_gd1a_shift)),
+        (229, col_pl, fp(row_supp_claims)),
+        # row_supp_claims is int; +1 is always safe
+        (230, col_pl, fp(row_supp_claims + 1) if row_supp_claims else Z),
+        # OCS rows
+        *[(235 + i, col_pl, fp(_int(ocs_row[0]) + i))
+          for i in range(37) if ocs_row and ocs_row[0]],
+        # OEM brands
+        (275, col_pl, fp(_int(oem_trn[0])) if oem_trn and oem_trn[0] else Z),
+        (276, col_pl, _oem_sum(0)),
+        (277, col_pl, fp(_int(oem_mgn[0])) if oem_mgn and oem_mgn[0] else Z),
+        (278, col_pl, fp(_int(oem_veh[0])) if oem_veh and oem_veh[0] else Z),
+        (279, col_pl, fp(_int(oem_log[0])) if oem_log and oem_log[0] else Z),
+        (280, col_pl, fp(_int(oem_roy[0])) if oem_roy and oem_roy[0] else Z),
+        (282, col_pl, fp(_int(oem_trn[1])) if oem_trn and len(oem_trn)>1 and oem_trn[1] else Z),
+        (283, col_pl, _oem_sum(1)),
+        (284, col_pl, fp(_int(oem_mgn[1])) if oem_mgn and len(oem_mgn)>1 and oem_mgn[1] else Z),
+        (285, col_pl, fp(_int(oem_veh[1])) if oem_veh and len(oem_veh)>1 and oem_veh[1] else Z),
+        (286, col_pl, fp(_int(oem_log[1])) if oem_log and len(oem_log)>1 and oem_log[1] else Z),
+        (287, col_pl, fp(_int(oem_roy[1])) if oem_roy and len(oem_roy)>1 and oem_roy[1] else Z),
+        (289, col_pl, fp(_int(oem_trn[2])) if oem_trn and len(oem_trn)>2 and oem_trn[2] else Z),
+        (290, col_pl, _oem_sum(2)),
+        (291, col_pl, fp(_int(oem_mgn[2])) if oem_mgn and len(oem_mgn)>2 and oem_mgn[2] else Z),
+        (292, col_pl, fp(_int(oem_veh[2])) if oem_veh and len(oem_veh)>2 and oem_veh[2] else Z),
+        (293, col_pl, fp(_int(oem_log[2])) if oem_log and len(oem_log)>2 and oem_log[2] else Z),
+        (294, col_pl, fp(_int(oem_roy[2])) if oem_roy and len(oem_roy)>2 and oem_roy[2] else Z),
+        (304, col_pl, fp(row_func_rd)),    (305, col_pl, fp(row_nonfunc_rd)),
+        (307, col_pl, frd(row_func_rd_rev)),  (308, col_pl, frd(row_func_rd_cost)),
+        (309, col_pl, frd(row_nf_rd_rev)),    (310, col_pl, frd(row_nf_rd_cost)),
+        (313, col_pl, _idx(idx_labour,  0)), (314, col_pl, _idx(idx_is,       0)),
+        (315, col_pl, _idx(idx_dep,     0)), (316, col_pl, _idx(idx_prov,     0)),
+        (317, col_pl, _idx(idx_overhead,0)),
+        (319, col_pl, _idx(idx_labour,  1)), (320, col_pl, _idx(idx_is,       1)),
+        (321, col_pl, _idx(idx_dep,     1)), (322, col_pl, _idx(idx_prov,     1)),
+        (323, col_pl, _idx(idx_overhead,1)),
+        (325, col_pl, _idx(idx_labour,  2)), (326, col_pl, _idx(idx_is,       2)),
+        (327, col_pl, _idx(idx_dep,     2)), (328, col_pl, _idx(idx_prov,     2)),
+        (329, col_pl, _idx(idx_overhead,2)),
+        (338, col_pl, formula_hq_sum),
+        (339, col_pl, formula_hq_tax_sum),
+        (340, col_pl, f_sum_UED),
+    ]
 
-    scenarios = sorted(df_master["Scenario"].astype(str).dropna().unique().tolist())
+    # ── New KPI Actual ────────────────────────────────────────────────────────
+    col_kpi = _c(col_KPI_write)
+    upd_kpi = [
+        (42,  col_kpi, f_kpi_1),
+        (45,  col_kpi, f_sum_kpi_1),
+        (205, col_kpi, f_mccp1),
+        (239, col_kpi, f_osp_sum),
+        (249, col_kpi, f_sum249),
+        (263, col_kpi, f_osp2),
+        (319, col_kpi, f_mccp2),
+        (382, col_kpi, f_sum_kpi_2),
+        (383, col_kpi, f_kpi_6),
+        (384, col_kpi, f_sum_kpi_3),
+        (387, col_kpi, f_kpi_111),
+        (390, col_kpi, f_kpi_12),
+        (391, col_kpi, f_sum_kpi_4),
+        (394, col_kpi, f_sum_kpi_5),
+        (402, col_kpi, f_kpi_5),
+        (421, col_kpi, f_kpi_18),
+        (482, col_kpi, f_sum_ocp1),
+        (500, col_kpi, f_sum_ocp2),
+        (532, col_kpi, f_tgk1),
+        (533, col_kpi, f_tgk2),
+        (534, col_kpi, f_tgk3),
+    ]
 
-    markets   = sorted(df_master["Market"].astype(str).dropna().unique().tolist()) if "Market" in df_master.columns else []
-    regions   = sorted(df_master["Region"].astype(str).dropna().unique().tolist()) if "Region" in df_master.columns else []
-    divisions = sorted(df_master["Division_Desc"].astype(str).dropna().unique().tolist()) if "Division_Desc" in df_master.columns else []
-    entities  = sorted(df_master["Entity_desc"].astype(str).dropna().unique().tolist()) if "Entity_desc" in df_master.columns else (
-                sorted(df_master["Entity"].astype(str).dropna().unique().tolist()) if "Entity" in df_master.columns else [])
-    lc_oh     = sorted(df_master["OH/LC"].astype(str).dropna().unique().tolist()) if "OH/LC" in df_master.columns else []
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 5  –  WRITE OUTPUT FILE
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 5: writing output file")
 
-    avail_group = [k for k in PREF_GROUP_ORDER if k in df_master.columns]
-    default_group = [k for k in ['OH/LC', 'Division_Desc', 'Function_Desc'] if k in avail_group]
+    sheet_names = ["Reclass", "Relief", "HQ Tagetik", "P&L Actual", "New KPI Actual"]
+    all_updates = [upd_reclass, upd_relief, upd_hq, upd_pl, upd_kpi]
 
-    st.markdown('<p class="va-section-label">🎛️ Filters & Configuration</p>', unsafe_allow_html=True)
-
-    cfg1, cfg2, cfg3 = st.columns([1, 1, 1])
-    with cfg1:
-        sel_period = st.selectbox("📅 Period", period_cols, index=len(period_cols)-1, key="sel_period")
-    with cfg2:
-        scenario_a = st.selectbox("📌 Scenario A (Base)", scenarios, index=0, key="sc_a")
-    with cfg3:
-        opts_b = [s for s in scenarios if s != scenario_a] or scenarios
-        scenario_b = st.selectbox("📌 Scenario B (Compare)", opts_b, index=0, key="sc_b")
-
-    flt1, flt2, flt3, flt4, flt5 = st.columns([1, 1, 1, 1, 1])
-    with flt1:
-        sel_markets = st.multiselect("🌍 Market", markets, default=markets, key="sel_markets") if markets else []
-    with flt2:
-        sel_regions = st.multiselect("🗺️ Region", regions, default=regions, key="sel_regions") if regions else []
-    with flt3:
-        sel_divisions = st.multiselect("🏢 Division", divisions, default=divisions, key="sel_divisions") if divisions else []
-    with flt4:
-        sel_entities = st.multiselect("🏛️ Entity", entities, default=entities, key="sel_entities") if entities else []
-    with flt5:
-        sel_lc_oh = st.multiselect("🏷️ OH/LC", lc_oh, default=lc_oh, key="sel_lc_oh") if lc_oh else []
-
-    cfg4, cfg5 = st.columns([2, 1])
-    with cfg4:
-        sel_groups = st.multiselect(
-            "🔀 Pivot Row Fields (hierarchy — top = highest level)",
-            avail_group,
-            default=default_group if default_group else avail_group[:2],
-            key="sel_groups"
-        )
-    with cfg5:
-        fav_mode = st.radio(
-            "✅ Favorable variance when",
-            ["A < B  (cost — lower is better)", "A > B  (revenue — higher is better)"],
-            key="fav_mode"
-        )
-        favorable_is_lower = fav_mode.startswith("A < B")
-
-    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-    run_btn = st.button("▶  Run Variance Analysis", key="run_btn")
-
-    if run_btn:
-        if not sel_groups:
-            st.warning("Select at least one Pivot Row Field.")
-        elif sel_period not in df_master.columns:
-            st.error(f"Period column '{sel_period}' not found in data.")
-        else:
-            try:
-                prog = st.progress(0, text="🔄 Preparing data…")
-                time.sleep(0.05)
-                prog.progress(10, text="🔄 Preparing data…")
-                time.sleep(0.1)
-
-                df_work = df_master.copy()
-                df_work["Scenario"] = df_work["Scenario"].astype(str).str.strip()
-
-                prog.progress(25, text="🔍 Applying filters…")
-                time.sleep(0.1)
-
-                if sel_markets and "Market" in df_work.columns:
-                    df_work = df_work[df_work["Market"].astype(str).isin(sel_markets)]
-                if sel_regions and "Region" in df_work.columns:
-                    df_work = df_work[df_work["Region"].astype(str).isin(sel_regions)]
-                if sel_divisions and "Division_Desc" in df_work.columns:
-                    df_work = df_work[df_work["Division_Desc"].astype(str).isin(sel_divisions)]
-                if sel_entities and "Entity_desc" in df_work.columns:
-                    df_work = df_work[df_work["Entity_desc"].astype(str).isin(sel_entities)]
-                elif sel_entities and "Entity" in df_work.columns:
-                    df_work = df_work[df_work["Entity"].astype(str).isin(sel_entities)]
-                if sel_lc_oh and "OH/LC" in df_work.columns:
-                    df_work = df_work[df_work["OH/LC"].astype(str).isin(sel_lc_oh)]
-
-                prog.progress(45, text="📊 Filtering scenarios…")
-                time.sleep(0.1)
-                df_work = df_work[df_work["Scenario"].isin([scenario_a, scenario_b])]
-
-                group_fields = list(sel_groups)
-
-                if not group_fields:
-                    prog.empty()
-                    st.warning("No group fields available.")
-                    st.stop()
-
-                use_cols = group_fields + ["Scenario", sel_period]
-                missing = [c for c in use_cols if c not in df_work.columns]
-                if missing:
-                    prog.empty()
-                    st.error(f"Missing columns: {missing}")
-                    st.stop()
-
-                prog.progress(60, text="🧮 Aggregating values…")
-                time.sleep(0.1)
-                base = df_work[use_cols].rename(columns={sel_period: "Value"}).copy()
-                base["Value"] = clean_numeric_series(base["Value"])
-
-                agg = base.groupby(group_fields + ["Scenario"], dropna=False)["Value"].sum().reset_index()
-                pivot_source_long = agg.copy()
-
-                prog.progress(78, text="🔀 Building pivot table…")
-                time.sleep(0.1)
-                piv = agg.pivot_table(index=group_fields, columns="Scenario", values="Value", aggfunc="sum", fill_value=0.0)
-                for s in [scenario_a, scenario_b]:
-                    if s not in piv.columns:
-                        piv[s] = 0.0
-                piv = piv[[scenario_a, scenario_b]].rename(columns={scenario_a: "A", scenario_b: "B"})
-
-                leaf_df = piv.reset_index()
-                leaf_df["Δ (A-B)"] = leaf_df["A"] - leaf_df["B"]
-                leaf_df["Δ% vs B"] = np.where(leaf_df["B"] == 0, np.nan, leaf_df["Δ (A-B)"] / leaf_df["B"])
-
-                header_a = f"{scenario_a} (A)"
-                header_b = f"{scenario_b} (B)"
-
-                prog.progress(95, text="✨ Finalising results…")
-                time.sleep(0.15)
-                prog.progress(100, text="✅ Done!")
-                time.sleep(0.4)
-                prog.empty()
-
-                st.session_state.leaf_df = leaf_df
-                st.session_state.pivot_source_long = pivot_source_long
-                st.session_state.var_context = {
-                    "sel_period": sel_period,
-                    "sel_markets": sel_markets,
-                    "sel_regions": sel_regions,
-                    "sel_divisions": sel_divisions,
-                    "scenario_a": scenario_a,
-                    "scenario_b": scenario_b,
-                    "header_a": header_a,
-                    "header_b": header_b,
-                    "group_fields": group_fields,
-                    "favorable_is_lower": favorable_is_lower,
-                }
-                # Clear any previous commentary when new variance is run
-                st.session_state.cg_report = None
-                st.session_state.cg_trace = None
-
-                st.success(f"✅ Variance computed — {len(leaf_df):,} leaf rows")
-                st.toast("Variance analysis complete! Scroll down to view results.", icon="📊")
-
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-    if st.session_state.leaf_df is not None and st.session_state.var_context is not None:
-        ctx = st.session_state.var_context
-        leaf_df = st.session_state.leaf_df
-        group_fields = ctx["group_fields"]
-        header_a = ctx["header_a"]
-        header_b = ctx["header_b"]
-        fav_lower = ctx["favorable_is_lower"]
-
-        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-
-        total_a   = float(leaf_df["A"].sum())
-        total_b   = float(leaf_df["B"].sum())
-        total_var = total_a - total_b
-        pct_var   = (total_var / total_b * 100) if total_b != 0 else 0.0
-        max_var   = float(leaf_df["Δ (A-B)"].abs().max())
-        n_fav     = int((leaf_df["Δ (A-B)"] > 0).sum()) if fav_lower else int((leaf_df["Δ (A-B)"] < 0).sum())
-        n_adv     = int((leaf_df["Δ (A-B)"] < 0).sum()) if fav_lower else int((leaf_df["Δ (A-B)"] > 0).sum())
-
-        var_color = "#059669" if (fav_lower and total_var < 0) or (not fav_lower and total_var > 0) else "#dc2626"
-        arrow = "▼" if total_var < 0 else "▲"
-
-        k1, k2, k3, k4 = st.columns(4)
-        for col_k, label, value, sub in [
-            (k1, f"Total {ctx['scenario_a']}", fmt_num(total_a), "Scenario A"),
-            (k2, f"Total {ctx['scenario_b']}", fmt_num(total_b), "Scenario B"),
-            (k3, "Net Variance (A−B)", f'<span style="color:{var_color}">{arrow} {fmt_num(total_var)}</span>', f"{pct_var:+.1f}% vs B"),
-            (k4, "Max Single |Δ|", fmt_num(max_var), f"▲ {n_fav} favourable · ▼ {n_adv} adverse"),
-        ]:
-            with col_k:
-                st.markdown(f"""
-<div class="va-metric-card">
-  <div class="mlabel">{label}</div>
-  <div class="mvalue">{value}</div>
-  <div class="msub">{sub}</div>
-</div>""", unsafe_allow_html=True)
-
-        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-        with st.expander(
-            f"📊 Pivot Variance · {ctx['sel_period']} · {header_a} vs {header_b}",
-            expanded=True
-        ):
-            pivot_html = build_pivot_html(leaf_df, group_fields, header_a, header_b, fav_lower)
-            st.markdown(pivot_html, unsafe_allow_html=True)
-
-        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-        st.markdown('<p class="va-section-label">🔍 Variance Hotspot Analysis</p>', unsafe_allow_html=True)
-
-        last_dim = group_fields[-1] if group_fields else None
-
-        if last_dim and last_dim in leaf_df.columns and len(leaf_df) > 0:
-            st.markdown(
-                f"**Top 4 adverse rows by `{last_dim}` — worst to least (darkest → lightest)**",
-                unsafe_allow_html=False
-            )
-            hotspot_html = build_hotspot_cards(leaf_df, group_fields, fav_lower)
-            st.markdown(hotspot_html, unsafe_allow_html=True)
-
-            st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-            st.markdown('<p class="va-section-label">📈 Top & Bottom 5 Movers</p>', unsafe_allow_html=True)
-
-            insight_dims = [c for c in group_fields if c in leaf_df.columns]
-            top5_cols = insight_dims[:3] + ["A", "B", "Δ (A-B)", "Δ% vs B"]
-            top5_cols = [c for c in top5_cols if c in leaf_df.columns]
-
-            t5, b5 = st.columns(2)
-            with t5:
-                st.markdown(f"**Top 5 {'Favourable' if fav_lower else 'Positive'} Variance**")
-                top5 = leaf_df.nsmallest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True) if fav_lower \
-                    else leaf_df.nlargest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True)
-                st.dataframe(top5, use_container_width=True, height=200)
-
-            with b5:
-                st.markdown(f"**Top 5 {'Adverse' if fav_lower else 'Negative'} Variance**")
-                bot5 = leaf_df.nlargest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True) if fav_lower \
-                    else leaf_df.nsmallest(5, "Δ (A-B)")[top5_cols].reset_index(drop=True)
-                st.dataframe(bot5, use_container_width=True, height=200)
-
-        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-        st.markdown('<p class="va-section-label">📥 Export</p>', unsafe_allow_html=True)
-
-        try:
-            excel_bytes = build_excel_export(
-                leaf_df=leaf_df,
-                group_fields=group_fields,
-                header_a=header_a,
-                header_b=header_b,
-                sel_period=ctx["sel_period"],
-                sel_markets=ctx["sel_markets"],
-                sel_regions=ctx["sel_regions"],
-                sel_divisions=ctx["sel_divisions"],
-                scenario_a=ctx["scenario_a"],
-                scenario_b=ctx["scenario_b"],
-                favorable_is_lower=fav_lower,
-                pivot_source_long=st.session_state.pivot_source_long
-            )
-            safe_period = ctx["sel_period"].replace("/", "-")
-            st.download_button(
-                "📥 Download Variance Report (Excel)",
-                excel_bytes,
-                f"variance_report_{safe_period}.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-            st.caption("Report includes: README · Variance (Flat) · Pivot (Outline with collapse/expand) · PivotSource")
-        except Exception as e:
-            st.error(f"Export error: {e}")
-
-# ══════════════════════════════════════════════
-# TAB 3 — COMMENTARY GENERATOR
-# ══════════════════════════════════════════════
-with tab3:
-
-    import io as _io
-
-    # ── Header ──────────────────────────────────
-    st.markdown('<p class="va-section-label">🤖 AI-Powered Commentary Generator</p>', unsafe_allow_html=True)
-    st.markdown(
-        "Generates an executive-level variance commentary using a **branched drill-down** methodology "
-        "powered by **Azure OpenAI** via **LangGraph**. Configure your data source, hierarchy, and metric "
-        "below — then hit **Generate Commentary**.",
-        unsafe_allow_html=False
+    legacy_path, result_path = paste_values_KPI_PL(
+        file_path_Template, sheet_names, all_updates, month_number, output_path,
     )
+    logger.info(f"P&L output written → {result_path}  ({time.time()-t0:.1f}s)")
 
-    # ── Section 1: Environment / Key Status ─────
-    with st.expander("🔑  Azure OpenAI — Environment Status", expanded=False):
-        env_keys = {
-            "AZURE_OPENAI_ENDPOINT":   os.getenv("AZURE_OPENAI_ENDPOINT"),
-            "AZURE_OPENAI_KEY":        os.getenv("AZURE_OPENAI_KEY"),
-            "AZURE_OPENAI_DEPLOYMENT": os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-            "AZURE_OPENAI_API_VERSION":os.getenv("AZURE_OPENAI_API_VERSION"),
-        }
-        all_ok = all(v for v in env_keys.values())
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 6  –  HAND OFF TO ACT
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 6: calling ACT")
 
-        badges_html = ""
-        for k, v in env_keys.items():
-            cls = "ok" if v else "missing"
-            icon = "✅" if v else "❌"
-            masked = (v[:6] + "…") if v else "NOT SET"
-            badges_html += f'<span class="cg-env-badge {cls}">{icon} {k} = {masked}</span>'
-
-        st.markdown(badges_html, unsafe_allow_html=True)
-
-        if not all_ok:
-            st.markdown("""
-<div class="cg-status-warn">
-  ⚠️ &nbsp;One or more Azure OpenAI environment variables are missing.
-  Add them to your <strong>.env</strong> file in the project root and restart the app.
-</div>""", unsafe_allow_html=True)
-            st.code("""# .env
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_KEY=your-api-key
-AZURE_OPENAI_DEPLOYMENT=your-deployment-name
-AZURE_OPENAI_API_VERSION=2024-02-15-preview
-""", language="bash")
-        else:
-            st.markdown('<div class="cg-status-ok">✅ &nbsp;All Azure OpenAI environment variables are set.</div>', unsafe_allow_html=True)
-
-    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-
-    # ── Section 2: Data Source ───────────────────
-    with st.expander("📂  Data Source", expanded=True):
-
-        # Check if Tab 2 pivot data is available
-        tab2_available = (
-            st.session_state.leaf_df is not None and
-            st.session_state.var_context is not None
-        )
-
-        if tab2_available:
-            ctx_t2 = st.session_state.var_context
-            tab2_info = (
-                f"Period: **{ctx_t2['sel_period']}** · "
-                f"Scenario A: **{ctx_t2['scenario_a']}** · "
-                f"Scenario B: **{ctx_t2['scenario_b']}** · "
-                f"Rows: **{len(st.session_state.leaf_df):,}**"
-            )
-            st.markdown(f'<div class="cg-status-ok">✅ &nbsp;Tab 2 pivot data ready — {tab2_info}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(
-                '<div class="cg-status-warn">ℹ️ &nbsp;No Tab 2 pivot data found. Run Variance Analysis first, or upload a file below.</div>',
-                unsafe_allow_html=True
-            )
-
-        cg_src = st.radio(
-            "Choose data source for commentary",
-            [
-                "🔗  Use Tab 2 Pivot Data (auto)",
-                "📁  Upload independent file (CSV / Excel)",
-            ],
-            key="cg_src_radio",
-            disabled=not tab2_available,
-            index=0 if tab2_available else 1
-        )
-
-        cg_df = None  # will be resolved below
-
-        if cg_src == "🔗  Use Tab 2 Pivot Data (auto)" and tab2_available:
-            # leaf_df has columns: [group_fields…, A, B, Δ (A-B), Δ% vs B]
-            # We expose it as-is to the LangGraph node
-            cg_df = st.session_state.leaf_df.copy()
-            with st.expander("👁️  Preview pivot data (top 20 rows)", expanded=False):
-                st.dataframe(cg_df.head(20), use_container_width=True, height=220)
-
-        else:
-            # Independent upload
-            cg_upload = st.file_uploader(
-                "Upload CSV or Excel file",
-                type=["csv", "xlsx", "xls"],
-                key="cg_upload"
-            )
-            if cg_upload:
-                try:
-                    if cg_upload.name.endswith(".csv"):
-                        cg_df = pd.read_csv(cg_upload)
-                    else:
-                        raw_bytes = cg_upload.getvalue()
-                        xls = pd.ExcelFile(_io.BytesIO(raw_bytes))
-                        if len(xls.sheet_names) > 1:
-                            chosen_sheet = st.selectbox("Select sheet", xls.sheet_names, key="cg_sheet")
-                        else:
-                            chosen_sheet = xls.sheet_names[0]
-                        cg_df = pd.read_excel(_io.BytesIO(raw_bytes), sheet_name=chosen_sheet, engine="openpyxl")
-
-                    st.success(f"✅ Loaded — {len(cg_df):,} rows × {len(cg_df.columns)} columns")
-                    with st.expander("👁️  Preview uploaded data (top 20 rows)", expanded=False):
-                        st.dataframe(cg_df.head(20), use_container_width=True, height=220)
-                except Exception as e:
-                    st.error(f"File load error: {e}")
-
-    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-
-    # ── Section 3: Metric Configuration ─────────
-    with st.expander("⚙️  Metric Configuration", expanded=True):
-
-        if cg_df is not None:
-            all_cols  = cg_df.columns.tolist()
-            num_cols  = cg_df.select_dtypes(include=["number"]).columns.tolist()
-            cat_cols  = cg_df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
-
-            mc1, mc2 = st.columns([1, 1])
-
-            with mc1:
-                st.markdown("**Variance Metric**")
-                has_variance_col = st.checkbox(
-                    "Variance column already present in data?",
-                    value=True,
-                    key="cg_has_var"
-                )
-
-                variance_col    = ""
-                base_scenario   = ""
-                compare_scenario = ""
-
-                if has_variance_col:
-                    # When using Tab 2 data, pre-select Δ (A-B)
-                    tab2_delta_col = "Δ (A-B)" if "Δ (A-B)" in num_cols else None
-                    preferred_var  = tab2_delta_col or next(
-                        (c for c in num_cols if "var" in c.lower()), num_cols[0] if num_cols else None
-                    )
-                    var_idx = num_cols.index(preferred_var) if preferred_var in num_cols else 0
-                    variance_col = st.selectbox(
-                        "Select Variance Column",
-                        num_cols,
-                        index=var_idx,
-                        key="cg_var_col"
-                    )
-                else:
-                    st.caption("Variance will be calculated as (Base − Compare)")
-                    base_scenario    = st.selectbox("Base Scenario Column",    num_cols, key="cg_base")
-                    compare_scenario = st.selectbox("Compare Scenario Column", num_cols, key="cg_compare")
-
-            with mc2:
-                st.markdown("**Drill-Down Hierarchy**")
-                # When using Tab 2 data, pre-populate with group_fields
-                default_hierarchy = []
-                if cg_src == "🔗  Use Tab 2 Pivot Data (auto)" and tab2_available:
-                    gf = st.session_state.var_context.get("group_fields", [])
-                    default_hierarchy = [c for c in gf if c in all_cols]
-                else:
-                    default_hierarchy = [c for c in cat_cols if c in all_cols]
-
-                hierarchy = st.multiselect(
-                    "Hierarchy Flow (left = top level → right = leaf reason)",
-                    options=all_cols,
-                    default=default_hierarchy,
-                    key="cg_hierarchy",
-                    help="The agent groups by the first column, drills through the middle levels, "
-                         "and reports Top-5 drivers from the LAST column."
-                )
-
-                st.caption(
-                    f"ℹ️  Selected {len(hierarchy)} level(s). "
-                    "The agent will loop through top-5 values at each level."
-                )
-        else:
-            st.info("Load a data source above to configure metrics.")
-
-    st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-
-    # ── Section 4: Run ───────────────────────────
-    env_ok = all([
-        os.getenv("AZURE_OPENAI_ENDPOINT"),
-        os.getenv("AZURE_OPENAI_KEY"),
-        os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-        os.getenv("AZURE_OPENAI_API_VERSION"),
-    ])
-
-    run_col, hint_col = st.columns([1, 3])
-    with run_col:
-        cg_run_btn = st.button(
-            "🧠  Generate Commentary",
-            key="cg_run_btn",
-            disabled=(cg_df is None or not env_ok)
-        )
-    with hint_col:
-        if not env_ok:
-            st.markdown(
-                '<span style="color:#dc2626;font-size:.8rem;">⚠️ Azure OpenAI env vars missing — see status panel above.</span>',
-                unsafe_allow_html=True
-            )
-        elif cg_df is None:
-            st.markdown(
-                '<span style="color:#6b7fa3;font-size:.8rem;">Load data and configure metrics to enable commentary generation.</span>',
-                unsafe_allow_html=True
-            )
-        else:
-            st.markdown(
-                '<span style="color:#059669;font-size:.8rem;">✅ Ready — click Generate Commentary to run the AI agent.</span>',
-                unsafe_allow_html=True
-            )
-
-    if cg_run_btn:
-        if not hierarchy:
-            st.warning("Please select at least one column in the Hierarchy.")
-        elif has_variance_col and not variance_col:
-            st.warning("Please select a variance column.")
-        elif not has_variance_col and (not base_scenario or not compare_scenario):
-            st.warning("Please select both Base and Compare scenario columns.")
-        else:
-            # Clear previous results
-            st.session_state.cg_report = None
-            st.session_state.cg_trace  = None
-
-            prog_cg = st.progress(0, text="🔄 Initialising LangGraph agent…")
-            try:
-                prog_cg.progress(15, text="📐 Building drill-down trace…")
-                app_graph = _build_langgraph()
-
-                prog_cg.progress(35, text="🧮 Running branched variance engine…")
-                inputs = {
-                    "df":               cg_df,
-                    "hierarchy_cols":   hierarchy,
-                    "has_variance_col": has_variance_col,
-                    "variance_col":     variance_col,
-                    "base_scenario":    base_scenario,
-                    "compare_scenario": compare_scenario,
-                    "path_trace":       [],
-                    "final_summary":    "",
-                }
-
-                prog_cg.progress(60, text="🤖 Calling Azure OpenAI for synthesis…")
-                result = app_graph.invoke(inputs)
-
-                prog_cg.progress(95, text="✨ Formatting report…")
-                time.sleep(0.2)
-                prog_cg.progress(100, text="✅ Commentary ready!")
-                time.sleep(0.4)
-                prog_cg.empty()
-
-                st.session_state.cg_report = result.get("final_summary", "")
-                st.session_state.cg_trace  = result.get("path_trace", [])
-                st.toast("Commentary generated! Scroll down to view the report.", icon="📝")
-
-            except Exception as e:
-                prog_cg.empty()
-                st.error(f"Commentary generation failed: {e}")
-
-    # ── Section 5: Results ───────────────────────
-    if st.session_state.cg_report:
-        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-
-        # ── Executive Report Card ──
-        st.markdown('<p class="va-section-label">📋 AI Executive Report</p>', unsafe_allow_html=True)
-
-        is_error = (
-            "aborted" in st.session_state.cg_report.lower() or
-            "error" in st.session_state.cg_report.lower()
-        )
-
-        if is_error:
-            st.error(st.session_state.cg_report)
-        else:
-            st.markdown(
-                f'<div class="cg-report-wrap">{st.session_state.cg_report}</div>',
-                unsafe_allow_html=True
-            )
-
-            dl1, dl2 = st.columns([1, 1])
-            with dl1:
-                st.download_button(
-                    "📥 Download Executive Report (.md)",
-                    data=st.session_state.cg_report,
-                    file_name="executive_variance_commentary.md",
-                    mime="text/markdown",
-                    key="cg_dl_md"
-                )
-            with dl2:
-                # Plain text version
-                st.download_button(
-                    "📥 Download as Plain Text (.txt)",
-                    data=st.session_state.cg_report,
-                    file_name="executive_variance_commentary.txt",
-                    mime="text/plain",
-                    key="cg_dl_txt"
-                )
-
-        # ── Drill-Down Trace ──
-        st.markdown('<hr class="va-divider">', unsafe_allow_html=True)
-        with st.expander("🧮  Branched Drill-Down Trace (raw calculation path)", expanded=False):
-            st.caption(
-                "The exact mathematical path the Pandas engine calculated before handing off to the LLM."
-            )
-            if st.session_state.cg_trace:
-                for step in st.session_state.cg_trace:
-                    step_s = str(step).strip()
-                    if not step_s:
-                        st.write("")
-                        continue
-                    if step_s.startswith("**Overall"):
-                        st.markdown(
-                            f'<div class="cg-trace-block primary">{step_s}</div>',
-                            unsafe_allow_html=True
-                        )
-                    elif step_s.startswith("===") or step_s.startswith("🔹"):
-                        st.markdown(
-                            f'<div class="cg-trace-block primary">{step_s}</div>',
-                            unsafe_allow_html=True
-                        )
-                    elif "FINAL LEVEL" in step_s:
-                        st.markdown(
-                            f'<div class="cg-trace-block final">{step_s}</div>',
-                            unsafe_allow_html=True
-                        )
-                    elif step_s.startswith("---"):
-                        st.markdown(
-                            f'<div class="cg-trace-block">{step_s}</div>',
-                            unsafe_allow_html=True
-                        )
-                    elif step_s.startswith("*=>"):
-                        st.caption(step_s)
-                    else:
-                        st.text(step_s)
-            else:
-                st.info("No trace data available.")
+    ACT(
+        file_path_P_L, legacy_path,
+        df_P_L_ROP_NE, df_P_L_HQ,
+        file_path_OSP, df_OSP,
+        file_path_HMF, df_HMF_Managerial,
+        file_path_New_KPI, df_P_L_New_KPI,
+        file_HQ_Item, df_hQ_items,
+        file_goodwill,
+        df_r_and_d, df_MZ_conso, df_P_L_Relief,
+        df_P_L_PL, df_P_L_Reclass, df_P_L_MCCP, df_P_L_OCS,
+        df_New_KPI_CFMI, df_New_goodwill, df_Act,
+        df_1c_osp,
+        file_paths_High_Level_Variance, df_high_variance_feuil,
+        file_paths_Relief_KD, df_Relief_KD,
+        file_paths_Purchase_Price, df_Purchase_Price,
+        file_paths_UP_Calc, df_UP_Calc,
+        file_paths_NANO_HFM, df_nano_hfm,
+        file_paths_ITP, df_itp,
+        file_path_Template, file_path_Template_1,
+        month_number, Var_Converter, var_Cfmi,
+        file_path_Template_man_1, file_path_goodwill_template,
+        result_path, output_path,
+    )
