@@ -1,0 +1,5 @@
+_MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun",
+               "Jul","Aug","Sep","Oct","Nov","Dec"]
+
+month_abbr = _MONTH_ABBR[selected_month - 1]   # selected_month is 1-based int
+HFM = f"HFM_{month_abbr}"
