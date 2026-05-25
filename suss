@@ -1,0 +1,1452 @@
+"""
+Submit_2.py  –  fully guarded calculation engine  (v4)
+-------------------------------------------------------
+Four-layer defence:
+
+  Layer 1 – Input normalisation  : None paths→"", None DFs→empty DataFrame
+  Layer 2 – Presence flags       : HAS_* booleans block all row/col lookups
+                                   when the source DF or file is absent.
+  Layer 3 – Integer guardrail    : _int(v) converts EVERY value that comes
+                                   from a dict lookup to int before arithmetic.
+                                   If conversion fails → 0, so row+1 never
+                                   raises TypeError.
+  Layer 4 – Safe formula builders: _safe_gen_formula / _safe_extract_formula
+                                   return Z ("=0") when row==0 or col==0,
+                                   so generate_excel_formula is never called
+                                   with invalid arguments.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from datetime import datetime
+
+import pandas as pd
+
+from Submit_2_Helper_function import (
+    find_row_numbers,
+    search_turnover_in_dataframe,
+    find_fmi_row_nv,
+    find_fmi_row_uc,
+    find_fmi_row_as,
+    find_fmi_row_export,
+    search_omp_terms,
+    search_manufacturing_terms,
+    MZ_Sheet_terms,
+    find_financial_indices,
+    find_oem_terms,
+    find_ocs_terms,
+    search_rd_terms,
+    find_R_and_D_File,
+    find_transfer_price_adjustment,
+    tax_and_public,
+    operating_profit,
+    relief_search_terms_new,
+    G_and_A_Reliev1,
+    export_ITP_Export,
+    energy_tgk_68,
+    find_columns_with_month_short,
+    find_columns_with_month_long,
+    find_month_columns_Relief_KD,
+    find_month_columns_export,
+    find_indices_feuil,
+    find_op_and_month,
+    find_outside_profit_and_month_value,
+    find_second_column_for_outside_profit,
+    generate_excel_formula,
+    generate_excel_formula_249,
+    extract_formula,
+    extract_value_formula_latest,
+    manage_sheet_visibility,
+    paste_values_KPI_PL,
+)
+from ACT import ACT
+from utils.logger import logger
+
+logger.info("Submit_2 triggered")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SENTINEL
+# ─────────────────────────────────────────────────────────────────────────────
+Z = "=0"   # written to cells when data is unavailable
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 3  –  INTEGER GUARDRAIL
+#  Apply to EVERY value from a dict lookup before doing arithmetic on it.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _int(v) -> int:
+    """
+    Safely convert v to int.
+    Handles: int, float, str-of-digits, None, empty-string → 0 on any failure.
+    This prevents TypeError when dict values are accidentally strings.
+    """
+    if v is None:
+        return 0
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        logger.warning(f"_int(): could not convert {v!r} to int – using 0")
+        return 0
+
+
+def _int_list(lst) -> list:
+    """Convert every element of a list/tuple to int via _int()."""
+    if not lst:
+        return [0]
+    return [_int(x) for x in lst]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 1  –  INPUT CHECKERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _df_ok(df, name: str) -> bool:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        logger.warning(f"[SKIP] DataFrame '{name}' absent/empty – cells → =0")
+        return False
+    return True
+
+
+def _file_ok(path: str, name: str) -> bool:
+    if not path or not os.path.isfile(path):
+        logger.warning(f"[SKIP] File '{name}' not found ({path!r}) – formulas → =0")
+        return False
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 2  –  SAFE WRAPPERS FOR EVERY HELPER FUNCTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _safe_col_short(df, month, name):
+    # Returns int (including 0) when found, None when not found.
+    # MUST use None not 0 as sentinel: column index 0 is a valid column.
+    if not _df_ok(df, name): return None
+    try:
+        result = find_columns_with_month_short(df, month)
+        return _int(result) if result is not None else None
+    except Exception as e:
+        logger.warning(f"find_columns_with_month_short({name}): {e}"); return None
+
+def _safe_col_long(df, month, name):
+    # Returns int (including 0) when found, None when not found.
+    # MUST use None not 0 as sentinel: column index 0 is a valid column.
+    if not _df_ok(df, name): return None
+    try:
+        result = find_columns_with_month_long(df, month)
+        return _int(result) if result is not None else None
+    except Exception as e:
+        logger.warning(f"find_columns_with_month_long({name}): {e}"); return None
+
+def _safe_find_row_numbers(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return find_row_numbers(df) or {}
+    except Exception as e:
+        logger.warning(f"find_row_numbers({name}): {e}"); return {}
+
+def _safe_search_turnover(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_turnover_in_dataframe(df) or {}
+    except Exception as e:
+        logger.warning(f"search_turnover({name}): {e}"); return {}
+
+def _safe_find_fmi_nv(df, name):
+    if not _df_ok(df, name): return (0,)*16
+    try:    return tuple(_int(x) for x in find_fmi_row_nv(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_nv({name}): {e}"); return (0,)*16
+
+def _safe_find_fmi_uc(df, name):
+    if not _df_ok(df, name): return (0,)*12
+    try:    return tuple(_int(x) for x in find_fmi_row_uc(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_uc({name}): {e}"); return (0,)*12
+
+def _safe_find_fmi_as(df, name):
+    if not _df_ok(df, name): return (0,)*16
+    try:    return tuple(_int(x) for x in find_fmi_row_as(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_as({name}): {e}"); return (0,)*16
+
+def _safe_find_fmi_export(df, name):
+    if not _df_ok(df, name): return (0,)*16
+    try:    return tuple(_int(x) for x in find_fmi_row_export(df))
+    except Exception as e:
+        logger.warning(f"find_fmi_row_export({name}): {e}"); return (0,)*16
+
+def _safe_omp(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_omp_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"search_omp_terms({name}): {e}"); return {}
+
+def _safe_manufacturing(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_manufacturing_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"search_manufacturing_terms({name}): {e}"); return {}
+
+def _safe_mz_sheet(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return MZ_Sheet_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"MZ_Sheet_terms({name}): {e}"); return {}
+
+def _safe_financial_indices(df, name):
+    if not _df_ok(df, name): return ([0],[0],[0],[0],[0])
+    try:
+        result = find_financial_indices(df)
+        # Each element is a list; make sure every item is int
+        return tuple(_int_list(lst) for lst in result)
+    except Exception as e:
+        logger.warning(f"find_financial_indices({name}): {e}")
+        return ([0],[0],[0],[0],[0])
+
+def _safe_oem_terms(df, name):
+    if not _df_ok(df, name): return ([0],[0],[0],[0],[0],[0],[0],[0])
+    try:
+        result = find_oem_terms(df)
+        return tuple(_int_list(lst) for lst in result)
+    except Exception as e:
+        logger.warning(f"find_oem_terms({name}): {e}")
+        return ([0],[0],[0],[0],[0],[0],[0],[0])
+
+def _safe_ocs_terms(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(find_ocs_terms(df) or [0])
+    except Exception as e:
+        logger.warning(f"find_ocs_terms({name}): {e}"); return [0]
+
+def _safe_rd_terms(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return search_rd_terms(df) or {}
+    except Exception as e:
+        logger.warning(f"search_rd_terms({name}): {e}"); return {}
+
+def _safe_rd_file(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return find_R_and_D_File(df) or {}
+    except Exception as e:
+        logger.warning(f"find_R_and_D_File({name}): {e}"); return {}
+
+def _safe_transfer_price(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(find_transfer_price_adjustment(df) or [0])
+    except Exception as e:
+        logger.warning(f"find_transfer_price_adjustment({name}): {e}"); return [0]
+
+def _safe_tax(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(tax_and_public(df) or [0])
+    except Exception as e:
+        logger.warning(f"tax_and_public({name}): {e}"); return [0]
+
+def _safe_op(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(operating_profit(df) or [0])
+    except Exception as e:
+        logger.warning(f"operating_profit({name}): {e}"); return [0]
+
+def _safe_reclass(df, name) -> int:
+    if not _df_ok(df, name): return 0
+    try:
+        r = G_and_A_Reliev1(df)
+        return _int(r) if r is not None else 0
+    except Exception as e:
+        logger.warning(f"G_and_A_Reliev1({name}): {e}"); return 0
+
+def _safe_relief(df, name) -> dict:
+    if not _df_ok(df, name): return {}
+    try:    return relief_search_terms_new(df) or {}
+    except Exception as e:
+        logger.warning(f"relief_search_terms_new({name}): {e}"); return {}
+
+def _safe_outside_profit(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_outside_profit_and_month_value(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_outside_profit_and_month_value({name}): {e}"); return (0, 0)
+
+def _safe_outside_profit_2(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_second_column_for_outside_profit(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_second_column_for_outside_profit({name}): {e}"); return (0, 0)
+
+def _safe_feuil(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_indices_feuil(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_indices_feuil({name}): {e}"); return (0, 0)
+
+def _safe_relief_kd_cols(df, month, name):
+    if not _df_ok(df, name): return [0, 0]
+    try:    return _int_list(find_month_columns_Relief_KD(df, month) or [0, 0])
+    except Exception as e:
+        logger.warning(f"find_month_columns_Relief_KD({name}): {e}"); return [0, 0]
+
+def _safe_itp_rows(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(export_ITP_Export(df) or [0])
+    except Exception as e:
+        logger.warning(f"export_ITP_Export({name}): {e}"); return [0]
+
+def _safe_itp_cols(df, month, name):
+    if not _df_ok(df, name): return [0, 0]
+    try:    return _int_list(find_month_columns_export(df, month) or [0, 0])
+    except Exception as e:
+        logger.warning(f"find_month_columns_export({name}): {e}"); return [0, 0]
+
+def _safe_nano(df, month, name):
+    if not _df_ok(df, name): return (0, 0)
+    try:
+        r, c = find_op_and_month(df, month)
+        return (_int(r), _int(c))
+    except Exception as e:
+        logger.warning(f"find_op_and_month({name}): {e}"); return (0, 0)
+
+def _safe_energy(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(energy_tgk_68(df) or [0])
+    except Exception as e:
+        logger.warning(f"energy_tgk_68({name}): {e}"); return [0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAYER 4  –  SAFE FORMULA BUILDERS
+#  _safe_gen_formula gates on row>0 AND col>0.
+#  Because ALL row/col values are ints (via _int()), arithmetic is safe.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _safe_gen_formula(row: int, col: int, sheet: str,
+                      file_path: str = "") -> str:
+    row, col = _int(row), _int(col)   # final int guardrail
+    if not row or not col:
+        logger.debug(f"_safe_gen_formula skipped: row={row} col={col} sheet={sheet}")
+        return Z
+    if file_path and not _file_ok(file_path, f"cross-wb [{sheet}]"):
+        return Z
+    try:
+        return generate_excel_formula(row, col, sheet,
+                                      file_path if file_path else None)
+    except Exception as e:
+        logger.warning(f"generate_excel_formula(r={row},c={col},{sheet}): {e}")
+        return Z
+
+
+def _safe_extract_formula(file_path: str, sheet: str,
+                          row: int, col: int, label: str = "") -> str:
+    row, col = _int(row), _int(col)
+    if not row or not col:
+        return Z
+    if not _file_ok(file_path, label or f"template extract({sheet},{row},{col})"):
+        return Z
+    try:
+        result = extract_formula(file_path, sheet, row, col)
+        return result if result else Z
+    except Exception as e:
+        logger.warning(f"extract_formula({sheet},{row},{col}): {e}")
+        return Z
+
+
+def _safe_extract_value_formula(file_path: str, month: int) -> str:
+    if not _file_ok(file_path, "P&L file for extract_value_formula_latest"):
+        return Z
+    try:
+        r = extract_value_formula_latest(file_path, month)
+        return r if r else Z
+    except Exception as e:
+        logger.warning(f"extract_value_formula_latest: {e}")
+        return Z
+
+
+def _safe_gen_formula_249(month: int, file_path_OSP: str) -> str:
+    if not _file_ok(file_path_OSP, "OSP file for generate_excel_formula_249"):
+        return Z
+    try:
+        r = generate_excel_formula_249(month, file_path_OSP)
+        return r if r else Z
+    except Exception as e:
+        logger.warning(f"generate_excel_formula_249: {e}")
+        return Z
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  COMPOUND FORMULA HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _join_sum(*formulas) -> str:
+    parts = [x[1:] for x in formulas if x and x != Z]
+    return f"={'  +  '.join(parts)}" if parts else Z
+
+
+def _compound(a: str, op: str, b: str) -> str:
+    if a == Z or b == Z:
+        return Z
+    return f"={a[1:]}{op}{b[1:]}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DICT-ROW EXTRACTOR  –  always returns int
+#  Use this instead of (dict.get(k) or [0])[0] everywhere.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _row_from_dict(d: dict, key: str) -> int:
+    """Extract first element of d[key] list as int; 0 on any failure."""
+    try:
+        val = d.get(key)
+        if not val:
+            return 0
+        return _int(val[0] if isinstance(val, (list, tuple)) else val)
+    except Exception:
+        return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SAFE ROW-BLOCK BUILDER
+#  Replaces every inline list-comprehension that does arithmetic on a base row.
+#
+#  Why a dedicated function instead of an inline comprehension?
+#  ─────────────────────────────────────────────────────────────
+#  The pattern   *[(excel_row+i, col, fp(base+i)) for i in range(N)]
+#  has THREE independent failure modes that the inline guard cannot catch all
+#  at once:
+#
+#    A. base == 0   → fp(0+i) = fp(i) → valid-looking row numbers (1,2,3…)
+#                     that exist in the ROP-NE sheet but belong to the WRONG
+#                     section → Excel writes formula pointing to wrong data.
+#                     The guard `if base` catches this but ONLY when base==0.
+#
+#    B. HAS_ROP_NE is False but col_ROP_NE happens to be non-zero (edge case)
+#       → fp() returns Z for each call, which is correct, but the tuple is
+#         still added to upd_pl with value Z.  That is safe but wasteful;
+#         the guard below skips the whole block cleanly.
+#
+#    C. col_ROP_NE == 0 (month column not found) → fp() returns Z for every
+#       call → 37 Z-value entries written → harmless but clutters the output.
+#       Guard below skips cleanly.
+#
+#    D. The cross-workbook path embedded in the formula is constructed from
+#       file_path_Template which may not match the ROP-NE source.  If the
+#       path is broken, Excel shows #REF regardless of the row value.
+#       The guard below stops formula generation entirely when the source
+#       DF or column is unavailable, preventing phantom cross-wb refs.
+#
+#  The function writes Z explicitly for every row when any condition fails,
+#  so the caller always receives exactly `count` tuples (or 0 when skipped).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_row_block(
+    base_row: int,
+    col_write: int,
+    has_df: bool,
+    col_source: int,
+    fp_fn,
+    zero_sentinel: str,
+    start_excel_row: int,
+    count: int,
+) -> list:
+    """
+    Build a list of (excel_row, col_write, formula_or_zero) tuples.
+
+    Parameters
+    ----------
+    base_row        : int   – 0-based row in the source DF where the block starts.
+                              Must be > 0 for any formula to be generated.
+    col_write       : int   – 1-based destination column (openpyxl).
+    has_df          : bool  – HAS_* presence flag for the source DataFrame.
+    col_source      : int   – column index found for this month in the source DF.
+                              Must be > 0 for any formula to be generated.
+    fp_fn           : callable – formula builder, e.g. fp() or fmz().
+    zero_sentinel   : str   – the Z constant ("=0").
+    start_excel_row : int   – first excel row to write into (1-based).
+    count           : int   – number of consecutive rows to write.
+
+    Guards
+    ------
+    If base_row <= 0  → all `count` cells written as zero_sentinel.
+    If not has_df     → all cells written as zero_sentinel.
+    If col_source <= 0 → all cells written as zero_sentinel.
+    Otherwise fp_fn(base_row + i) is called; it already returns zero_sentinel
+    when its own internal row/col checks fail.
+    """
+    base_row   = _int(base_row)
+    col_write  = _int(col_write)
+    col_source = _int(col_source)
+
+    # All three conditions must be satisfied to attempt formula generation
+    can_build = has_df and col_source > 0 and base_row > 0
+
+    result = []
+    for i in range(count):
+        excel_row = start_excel_row + i
+        if can_build:
+            # fp_fn already has its own row/col guard; this is belt-and-braces
+            formula = fp_fn(_int(base_row) + i)
+        else:
+            formula = zero_sentinel
+        result.append((excel_row, col_write, formula))
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PUBLIC ENTRY-POINT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def calculate_alternate_value_1(
+    file_path_P_L: str,
+    df_P_L_ROP_NE:  pd.DataFrame,
+    df_P_L_HQ:      pd.DataFrame,
+    file_path_OSP:  str,
+    df_OSP:         pd.DataFrame,
+    file_path_HMF:  str,
+    df_HMF_Managerial: pd.DataFrame,
+    file_path_New_KPI: str,
+    df_P_L_New_KPI: pd.DataFrame,
+    file_HQ_Item:   str,
+    df_hQ_items:    pd.DataFrame,
+    file_goodwill:  str,
+    df_r_and_d:     pd.DataFrame,
+    df_MZ_conso:    pd.DataFrame,
+    df_P_L_Relief:  pd.DataFrame,
+    df_P_L_PL:      pd.DataFrame,
+    df_P_L_Reclass: pd.DataFrame,
+    df_P_L_MCCP:    pd.DataFrame,
+    df_P_L_OCS:     pd.DataFrame,
+    df_New_KPI_CFMI:  pd.DataFrame,
+    df_New_goodwill:  pd.DataFrame,
+    df_Act:           pd.DataFrame,
+    file_paths_OSP_TGK:    str,
+    df_1c_osp:             pd.DataFrame,
+    file_paths_High_Level_Variance: str,
+    df_high_variance_feuil:         pd.DataFrame,
+    file_paths_Relief_KD:  str,
+    df_Relief_KD:          pd.DataFrame,
+    file_paths_Purchase_Price: str,
+    df_Purchase_Price:         pd.DataFrame,
+    file_paths_UP_Calc:    str,
+    df_UP_Calc:            pd.DataFrame,
+    file_paths_NANO_HFM:   str,
+    df_nano_hfm:           pd.DataFrame,
+    file_paths_ITP:        str,
+    df_itp:                pd.DataFrame,
+    file_path_Template:      str,
+    file_path_Template_1:    str,
+    month_number:            int,
+    Var_Converter:           float,
+    var_Cfmi:                float,
+    ePWR_var:                float,
+    connectivity_var:        float,
+    cafe_penalty_var:        float,
+    file_path_Template_man_1: str,
+    file_path_Template_man:   str,
+    file_path_goodwill_template: str,
+    output_path:             str,
+    var_converter_bJPY:      str,
+    var_converter_mEUR:      str,
+) -> None:
+
+    t0 = time.time()
+    logger.info("calculate_alternate_value_1 started")
+
+    # ── Normalise inputs ──────────────────────────────────────────────────────
+    def _p(v): return v if isinstance(v, str) else ""
+    def _d(v): return v if isinstance(v, pd.DataFrame) else pd.DataFrame()
+
+    file_path_P_L               = _p(file_path_P_L)
+    file_path_OSP               = _p(file_path_OSP)
+    file_path_HMF               = _p(file_path_HMF)
+    file_path_New_KPI           = _p(file_path_New_KPI)
+    file_HQ_Item                = _p(file_HQ_Item)
+    file_goodwill               = _p(file_goodwill)
+    file_paths_OSP_TGK          = _p(file_paths_OSP_TGK)
+    file_paths_High_Level_Variance = _p(file_paths_High_Level_Variance)
+    file_paths_Relief_KD        = _p(file_paths_Relief_KD)
+    file_paths_Purchase_Price   = _p(file_paths_Purchase_Price)
+    file_paths_UP_Calc          = _p(file_paths_UP_Calc)
+    file_paths_NANO_HFM         = _p(file_paths_NANO_HFM)
+    file_paths_ITP              = _p(file_paths_ITP)
+    file_path_Template          = _p(file_path_Template)
+    file_path_Template_1        = _p(file_path_Template_1)
+    file_path_Template_man      = _p(file_path_Template_man)
+    file_path_Template_man_1    = _p(file_path_Template_man_1)
+    file_path_goodwill_template = _p(file_path_goodwill_template)
+
+    df_P_L_ROP_NE           = _d(df_P_L_ROP_NE)
+    df_P_L_HQ               = _d(df_P_L_HQ)
+    df_OSP                  = _d(df_OSP)
+    df_HMF_Managerial       = _d(df_HMF_Managerial)
+    df_P_L_New_KPI          = _d(df_P_L_New_KPI)
+    df_hQ_items             = _d(df_hQ_items)
+    df_r_and_d              = _d(df_r_and_d)
+    df_MZ_conso             = _d(df_MZ_conso)
+    df_P_L_Relief           = _d(df_P_L_Relief)
+    df_P_L_PL               = _d(df_P_L_PL)
+    df_P_L_Reclass          = _d(df_P_L_Reclass)
+    df_P_L_MCCP             = _d(df_P_L_MCCP)
+    df_P_L_OCS              = _d(df_P_L_OCS)
+    df_New_KPI_CFMI         = _d(df_New_KPI_CFMI)
+    df_New_goodwill         = _d(df_New_goodwill)
+    df_Act                  = _d(df_Act)
+    df_1c_osp               = _d(df_1c_osp)
+    df_high_variance_feuil  = _d(df_high_variance_feuil)
+    df_Relief_KD            = _d(df_Relief_KD)
+    df_Purchase_Price       = _d(df_Purchase_Price)
+    df_UP_Calc              = _d(df_UP_Calc)
+    df_nano_hfm             = _d(df_nano_hfm)
+    df_itp                  = _d(df_itp)
+
+    month_number = _int(month_number)
+    adj          = (month_number - 4) % 12
+
+    # ── Timestamped output subfolder ──────────────────────────────────────────
+    # Every run writes into its own subfolder: <output_path>/<YYYYMMDD_HHMMSS>/
+    # This guarantees no file from a previous run is ever overwritten.
+    # All downstream callers (paste_values_KPI_PL, ACT, paste_values_goodwill)
+    # receive this timestamped path instead of the raw output_path.
+    _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _month_label = [
+        "Jan","Feb","Mar","Apr","May","Jun",
+        "Jul","Aug","Sep","Oct","Nov","Dec"
+    ][month_number - 1] if 1 <= month_number <= 12 else f"M{month_number:02d}"
+    _run_folder_name = f"{_month_label}_{_ts}"
+    if output_path:
+        timestamped_output_path = os.path.join(output_path, _run_folder_name)
+        try:
+            os.makedirs(timestamped_output_path, exist_ok=True)
+            logger.info(f"Output folder created: {timestamped_output_path}")
+        except Exception as _e:
+            logger.warning(f"Could not create timestamped folder ({_e}) – "
+                           f"falling back to output_path: {output_path}")
+            timestamped_output_path = output_path
+    else:
+        timestamped_output_path = output_path   # empty → let paste_values handle it
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Presence flags ────────────────────────────────────────────────────────
+    HAS_ROP_NE    = _df_ok(df_P_L_ROP_NE,           "df_P_L_ROP_NE")
+    HAS_HQ        = _df_ok(df_P_L_HQ,               "df_P_L_HQ")
+    HAS_OSP       = _df_ok(df_OSP,                  "df_OSP")
+    HAS_NEW_KPI   = _df_ok(df_P_L_New_KPI,          "df_P_L_New_KPI")
+    HAS_HQ_ITEMS  = _df_ok(df_hQ_items,             "df_hQ_items")
+    HAS_R_AND_D   = _df_ok(df_r_and_d,              "df_r_and_d")
+    HAS_MZ        = _df_ok(df_MZ_conso,             "df_MZ_conso")
+    HAS_RELIEF    = _df_ok(df_P_L_Relief,           "df_P_L_Relief")
+    HAS_PL_PL     = _df_ok(df_P_L_PL,              "df_P_L_PL")
+    HAS_RECLASS   = _df_ok(df_P_L_Reclass,         "df_P_L_Reclass")
+    HAS_MCCP      = _df_ok(df_P_L_MCCP,            "df_P_L_MCCP")
+    HAS_OCS       = _df_ok(df_P_L_OCS,             "df_P_L_OCS")
+    HAS_FEUIL     = _df_ok(df_high_variance_feuil,  "df_high_variance_feuil")
+    HAS_RELIEF_KD = _df_ok(df_Relief_KD,            "df_Relief_KD")
+    HAS_ITP       = _df_ok(df_itp,                  "df_itp")
+    HAS_NANO      = _df_ok(df_nano_hfm,             "df_nano_hfm")
+
+    HAS_FILE_HQ_ITEM = _file_ok(file_HQ_Item,                    "HQ Item file")
+    HAS_FILE_OSP     = _file_ok(file_path_OSP,                   "OSP file")
+    HAS_FILE_PL      = _file_ok(file_path_P_L,                   "P&L file")
+    HAS_FILE_TGK     = _file_ok(file_paths_OSP_TGK,              "OSP TGK file")
+    HAS_FILE_HLV     = _file_ok(file_paths_High_Level_Variance,  "High_Level_Variance file")
+    HAS_FILE_KD      = _file_ok(file_paths_Relief_KD,            "Relief KD file")
+    HAS_FILE_PP      = _file_ok(file_paths_Purchase_Price,       "Purchase Price file")
+    HAS_FILE_UP      = _file_ok(file_paths_UP_Calc,              "UP Calc file")
+    HAS_FILE_NANO    = _file_ok(file_paths_NANO_HFM,             "NANO HFM file")
+    HAS_FILE_ITP     = _file_ok(file_paths_ITP,                  "ITP file")
+    HAS_TMPL_MAN     = _file_ok(file_path_Template_man,          "Template_man file")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 1  –  COLUMN INDICES  (all int)
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 1: resolving column indices")
+
+    col_ROP_NE   = _safe_col_short(df_P_L_ROP_NE,  month_number, "df_P_L_ROP_NE")  if HAS_ROP_NE  else None
+    col_PL_PL    = _safe_col_short(df_P_L_PL,       month_number, "df_P_L_PL")      if HAS_PL_PL   else None
+    col_New_KPI  = _safe_col_short(df_P_L_New_KPI,  month_number, "df_P_L_New_KPI") if HAS_NEW_KPI else None
+    col_MZ_conso = _safe_col_short(df_MZ_conso,     month_number, "df_MZ_conso")    if HAS_MZ      else None
+    col_Reclass  = _safe_col_short(df_P_L_Reclass,  month_number, "df_P_L_Reclass") if HAS_RECLASS else None
+    col_Relief   = _int(4 + adj)
+
+    col_r_and_d  = _safe_col_long(df_r_and_d,   month_number, "df_r_and_d")   if HAS_R_AND_D  else None
+    col_hq       = _safe_col_long(df_hQ_items,  month_number, "df_hQ_items")  if HAS_HQ_ITEMS else None
+    col_hq_tgt   = _safe_col_long(df_P_L_HQ,    month_number, "df_P_L_HQ")   if HAS_HQ       else None
+    col_mccp     = _safe_col_long(df_P_L_MCCP,  month_number, "df_P_L_MCCP") if HAS_MCCP     else None
+    col_ocp      = _safe_col_long(df_P_L_OCS,   month_number, "df_P_L_OCS")  if HAS_OCS      else None
+
+    col_osp_tgk   = _int(1 + adj)
+    # None-safe arithmetic: if col is None, keep None to propagate the sentinel
+    col_PL_write  = (_int(col_PL_PL)  + 1) if col_PL_PL  is not None else None
+    col_KPI_write = (_int(col_New_KPI) + 1) if col_New_KPI is not None else None
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 2  –  ROW INDICES
+    #  Every lookup goes through _row_from_dict() → guaranteed int.
+    #  Every tuple unpack goes through _safe_find_fmi_* → guaranteed ints.
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 2: resolving row indices")
+
+    # ── ROP NE ────────────────────────────────────────────────────────────────
+    row_map = _safe_find_row_numbers(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _r(k): return _row_from_dict(row_map, k)
+
+    row_nissan_retail   = _r("nissanretailvolume")
+    row_infiniti_retail = _r("infinitiretailvolume")
+    row_datsun_retail   = _r("datsunretailvolume")
+    row_tiv             = _r("tiv")
+    row_ms_nissan       = _r("marketshare-nissan")
+    row_ms_infiniti     = _r("marketshare-infiniti")
+    row_ms_datsun       = _r("marketshare-datsun")
+    row_opening_stock   = _r("openingstock")
+    row_nmuk            = _r("nmuk")
+    row_nmisa           = _r("nmisa")
+    row_nmgr            = _r("nmgr")
+    row_purchase_vol    = _r("purchasevolume")
+    row_total_in        = _r("totalin")
+    row_ew_nissan       = _r("europeanwholesalevolume-nissan")
+    row_ew_infiniti     = _r("europeanwholesalevolume-infiniti")
+    row_ew_datsun       = _r("europeanwholesalevolume-datsun")
+    row_exp_nissan      = _r("exportvolumenissan")
+    row_exp_infiniti    = _r("exportvolume-infiniti")
+    row_renault_trucks  = _r("renaulttrucks")
+    row_daimler         = _r("daimler")
+    row_renault         = _r("renault")
+    row_gtr_idg         = _r("gtr[idg]")
+    row_captives        = _r("captives")
+    row_scope_adj       = _r("scopeadjustment")
+    row_closing_stock   = _r("closingstock")
+
+    # ── Turnover ──────────────────────────────────────────────────────────────
+    t2 = _safe_search_turnover(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _t(k): return _row_from_dict(t2, k)
+
+    row_nissan_nv   = _t("nissan nv")
+    row_nissan_bb   = _t("nissan bb")
+    row_infiniti_nv = _t("infiniti nv")
+    row_infiniti_bb = _t("infiniti bb")
+    row_datsun_nv   = _t("datsun nv")
+    row_datsun_bb   = _t("datsun bb")
+    row_nissan_uc   = _t("nissan used cars")
+    row_infiniti_uc = _t("infiniti used cars")
+    row_nissan_as   = _t("nissan after sales")
+    row_infiniti_as = _t("infiniti after sales")
+    row_datsun_as   = _t("datsun after sales")
+    row_exp_nis_t   = _t("export nissan")
+    row_exp_inf_t   = _t("export infiniti")
+
+    # ── FMI (all return int tuples) ───────────────────────────────────────────
+    (fmi_nis_nv, trn_nis_nv, cos_nis_nv, vme_nis_nv,
+     fmi_dat_nv, trn_dat_nv, cos_dat_nv, vme_dat_nv,
+     fmi_inf_nv, trn_inf_nv, cos_inf_nv, vme_inf_nv,
+     fmi_tot_nv, trn_tot_nv, cos_tot_nv, vme_tot_nv,
+     ) = _safe_find_fmi_nv(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*16
+
+    (fmi_nis_uc, trn_nis_uc, cos_nis_uc, vme_nis_uc,
+     fmi_dat_uc, trn_dat_uc, cos_dat_uc, vme_dat_uc,
+     fmi_tot_uc, trn_tot_uc, cos_tot_uc, vme_tot_uc,
+     ) = _safe_find_fmi_uc(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*12
+
+    (fmi_nis_as, trn_nis_as, cos_nis_as, vme_nis_as,
+     fmi_dat_as, trn_dat_as, cos_dat_as, vme_dat_as,
+     fmi_inf_as, trn_inf_as, cos_inf_as, vme_inf_as,
+     fmi_tot_as, trn_tot_as, cos_tot_as, vme_tot_as,
+     ) = _safe_find_fmi_as(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*16
+
+    (fmi_nis_ex, trn_nis_ex, cos_nis_ex, vme_nis_ex,
+     fmi_dat_ex, trn_dat_ex, cos_dat_ex, vme_dat_ex,
+     fmi_inf_ex, trn_inf_ex, cos_inf_ex, vme_inf_ex,
+     fmi_tot_ex, trn_tot_ex, cos_tot_ex, vme_tot_ex,
+     ) = _safe_find_fmi_export(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else (0,)*16
+
+    # ── OMP ───────────────────────────────────────────────────────────────────
+    omp = _safe_omp(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _omp(k): return _row_from_dict(omp, k)
+    row_x83_rop       = _omp("x83 sales to renault")
+    row_f91r_rop      = _omp("f91r sales to renault trucks")
+    row_pp_inter_rop  = _omp("production parts sales to inter-companies")
+    row_cant_rop      = _omp("cantabria sales to third party")
+    row_parts_ren_rop = _omp("parts sales to renault")
+    row_bat_oth_rop   = _omp("battery plant other costs")
+    row_scraps_rop    = _omp("scraps sales")
+    row_pensions_rop  = _omp("pensions")
+    row_others_rop    = _omp("others")
+
+    # ── Manufacturing ─────────────────────────────────────────────────────────
+    mfg = _safe_manufacturing(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    def _mfg(k): return _row_from_dict(mfg, k)
+    row_materials      = _mfg("materials costs")
+    row_bo_reduct      = _mfg("b/o cost reduction")
+    row_renault_tp     = _mfg("renault tp")
+    row_ic_kd          = _mfg("intercompany parts / kd")
+    row_inbound_fr     = _mfg("inbound freight / insurance")
+    row_inbound_duty   = _mfg("inbound duty")
+    row_inhouse_dl     = _mfg("inhouse / direct labour")
+    row_bat_nmuk_mfg   = _mfg("battery (nmuk)")
+    row_events         = _mfg("events")
+    row_oth_adj_mfg    = _mfg("other adjustments")
+    row_others_mfg     = _mfg("others")
+    row_core_fixed     = _mfg("core fixed")
+    row_pic_nissan     = _mfg("pic (nissan)")
+    row_regional_cost  = _mfg("regional cost")
+    row_vend_tool      = _mfg("vendor tooling depreciation")
+    row_projects       = _mfg("projects")
+    row_nesas          = _mfg("nesas/nisa manufacturing")
+    row_bat_fixed      = _mfg("battery fixed")
+    row_inf_fixed_gd1a = _mfg("infiniti fixed cost (gd1a)")
+    row_maint_dd       = _mfg("maintenance of existing models (d&d)")
+    row_gd1a_shift     = _mfg("gd1a top position shift to icp")
+    row_supp_claims    = _mfg("supplier claims & other")
+
+    # ── G&A financial indices (int lists) ─────────────────────────────────────
+    (idx_labour, idx_is, idx_dep, idx_prov, idx_overhead) = (
+        _safe_financial_indices(df_P_L_ROP_NE, "df_P_L_ROP_NE")
+        if HAS_ROP_NE else ([0],[0],[0],[0],[0])
+    )
+
+    # ── OEM (int lists) ───────────────────────────────────────────────────────
+    (oem_trn, oem_std, oem_mgn, oem_veh,
+     oem_log, oem_roy, oem_oth, oem_eop) = (
+        _safe_oem_terms(df_P_L_ROP_NE, "df_P_L_ROP_NE")
+        if HAS_ROP_NE else ([0],[0],[0],[0],[0],[0],[0],[0])
+    )
+
+    # ── OCS (int list) ────────────────────────────────────────────────────────
+    ocs_row = _safe_ocs_terms(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else [0]
+
+    # ── R&D (ROP NE) ──────────────────────────────────────────────────────────
+    rd_rows = _safe_rd_terms(df_P_L_ROP_NE, "df_P_L_ROP_NE") if HAS_ROP_NE else {}
+    row_func_rd    = _row_from_dict(rd_rows, "functional r&d")
+    row_nonfunc_rd = _row_from_dict(rd_rows, "non functional r&d")
+
+    # ── R&D File ──────────────────────────────────────────────────────────────
+    rd_file = _safe_rd_file(df_r_and_d, "df_r_and_d") if HAS_R_AND_D else {}
+    def _rdf(k): return _row_from_dict(rd_file, k)
+    row_func_rd_rev  = _rdf("functional r&d revenue")
+    row_func_rd_cost = _rdf("functional r&d cost")
+    row_nf_rd_rev    = _rdf("non functional r&d revenue")
+    row_nf_rd_cost   = _rdf("non functional r&d cost")
+
+    # ── MZ conso ──────────────────────────────────────────────────────────────
+    mz = _safe_mz_sheet(df_MZ_conso, "df_MZ_conso") if HAS_MZ else {}
+    def _mz(k): return _row_from_dict(mz, k)
+    row_mz_x83      = _mz("x83 sales to renault")
+    row_mz_trucks   = _mz("sales to renault trucks")
+    row_mz_pp_inter = _mz("production parts sales to inter-companies")
+    row_mz_cant     = _mz("cantabria sales to third party")
+    row_mz_h4bu     = _mz("parts sales to renault (h4bu camshaft)")
+    row_mz_scrap    = _mz("scrap sales")
+    row_mz_bat      = _mz("battery plant to")
+    row_mz_others   = _mz("others")
+
+    # ── HQ items ─────────────────────────────────────────────────────────────
+    tp_list  = _safe_transfer_price(df_hQ_items, "df_hQ_items") if HAS_HQ_ITEMS else [0]
+    tp_base  = _int(tp_list[0]) if tp_list else 0
+
+    tax_list = _safe_tax(df_P_L_HQ, "df_P_L_HQ") if HAS_HQ else [0]
+    op_list  = _safe_op (df_P_L_HQ, "df_P_L_HQ") if HAS_HQ else [0]
+    tax_base = _int(tax_list[0]) if tax_list else 0
+    op_base  = _int(op_list[0])  if op_list  else 0
+
+    # ── Reclass ───────────────────────────────────────────────────────────────
+    reclass_row = _int(_safe_reclass(df_P_L_Reclass, "df_P_L_Reclass")) if HAS_RECLASS else 0
+
+    # ── Relief rows (all int via _row_from_dict) ──────────────────────────────
+    rel = _safe_relief(df_P_L_Relief, "df_P_L_Relief") if HAS_RELIEF else {}
+    def _rel(k): return _row_from_dict(rel, k)
+
+    row_rel_recall    = _rel("recall service/campaigns")
+    row_rel_kd_nmuk   = _rel("kd itp (nmuk)")
+    row_rel_kd_nmisa  = _rel("kd itp (nmisa)")
+    row_rel_kd_nmgr   = _rel("kd itp (nmgr)")
+    row_rel_conn      = _rel("connectivity")
+    row_rel_itp_nis   = _rel("itp cbu nissan")
+    row_rel_itp_inf   = _rel("itp cbu infiniti")
+    row_rel_iln_nmuk  = _rel("iln export (nmuk)")
+    row_rel_iln_nmisa = _rel("iln export (nmisa)")
+    row_rel_err_mz    = _rel("error correction in mz (?)")
+    row_rel_mz_imp    = _rel("mz impairment")
+    row_rel_ga_imp    = _rel("g&a impairment")
+    row_rel_cev       = _rel("compact ev/vt impairment")
+    row_rel_bat_nmuk  = _rel("battery 40 kw itp ( nmuk )")
+    row_rel_bat_nmisa = _rel("battery 40 kw itp ( nmisa )")
+    row_rel_bat_cancel= _rel("battery cancelation")
+    row_rel_err_wd5   = _rel("error correction in mz (after wd5)")
+    row_rel_top_daim  = _rel("top daimler correction (after wd5)")
+    row_rel_inf_fmi   = _rel("infiniti fmi correction (after wd5)")
+
+    # ── OSP outside profit (int pairs) ────────────────────────────────────────
+    row_osp1, col_osp1 = (
+        _safe_outside_profit(df_OSP, month_number, "df_OSP")
+        if HAS_OSP else (0, 0)
+    )
+    row_osp2, col_osp2 = (
+        _safe_outside_profit_2(df_OSP, month_number, "df_OSP")
+        if HAS_OSP else (0, 0)
+    )
+
+    # ── Feuil1 (int pair) ─────────────────────────────────────────────────────
+    row_feuil, col_feuil_base = (
+        _safe_feuil(df_high_variance_feuil, month_number, "df_high_variance_feuil")
+        if HAS_FEUIL else (0, 0)
+    )
+    col_feuil = _int(col_feuil_base + 1 + adj) if col_feuil_base else 0
+
+    # ── Relief KD (int list) ──────────────────────────────────────────────────
+    kd_cols = (
+        _safe_relief_kd_cols(df_Relief_KD, month_number, "df_Relief_KD")
+        if HAS_RELIEF_KD else [0, 0]
+    )
+
+    # ── ITP (int lists) ───────────────────────────────────────────────────────
+    itp_rows = _safe_itp_rows(df_itp, "df_itp")       if HAS_ITP else [0]
+    itp_cols = _safe_itp_cols(df_itp, month_number, "df_itp") if HAS_ITP else [0, 0]
+
+    # ── NANO HFM (int pair) ───────────────────────────────────────────────────
+    row_nano, col_nano = (
+        _safe_nano(df_nano_hfm, month_number, "df_nano_hfm")
+        if HAS_NANO else (0, 0)
+    )
+
+    # ── Energy (int) ──────────────────────────────────────────────────────────
+    energy_list = _safe_energy(df_hQ_items, "df_hQ_items") if HAS_HQ_ITEMS else [0]
+    energy_row  = _int(energy_list[0]) if energy_list else 0
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 3  –  FORMULA STRINGS
+    #  All row/col values are now guaranteed ints.
+    #  _safe_gen_formula short-circuits on row==0 or col==0.
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 3: building formula strings")
+
+    SH = "ROP NE (Tagetik)"
+
+    # ── Source-DF-bound formula builders ──────────────────────────────────────
+
+    def fp(row: int) -> str:
+        """ROP NE → skips if absent or column not found."""
+        if not HAS_ROP_NE or col_ROP_NE is None:
+            return Z
+        return _safe_gen_formula(_int(row), col_ROP_NE, SH)
+
+    def fmz(row: int) -> str:
+        if not HAS_MZ or col_MZ_conso is None: return Z
+        return _safe_gen_formula(_int(row), col_MZ_conso, "MZ conso TGK")
+
+    def frd(row: int) -> str:
+        if not HAS_R_AND_D or col_r_and_d is None: return Z
+        return _safe_gen_formula(_int(row), col_r_and_d, "R&D")
+
+    def focp(row: int) -> str:
+        if not HAS_OCS or col_ocp is None: return Z
+        return _safe_gen_formula(_int(row), col_ocp, "OCS details")
+
+    def fmccp(row: int) -> str:
+        if not HAS_MCCP or col_mccp is None: return Z
+        return _safe_gen_formula(_int(row), col_mccp, "MCPP")
+
+    def frel(row: int) -> str:
+        """Relief sheet – row MUST be int > 0."""
+        row = _int(row)
+        if not HAS_RELIEF or not row: return Z
+        return _safe_gen_formula(row, col_Relief, "Relief")
+
+    def freclass(row: int) -> str:
+        row = _int(row)
+        if not HAS_RECLASS or not row or col_Reclass is None: return Z
+        return _safe_gen_formula(row, col_Reclass, "Reclass")
+
+    def fhq_tgt(row: int) -> str:
+        row = _int(row)
+        if not HAS_HQ or col_hq_tgt is None or not row: return Z
+        return _safe_gen_formula(row, col_hq_tgt, "HQ Tagetik")
+
+    def fhq_item(offset: int) -> str:
+        offset = _int(offset)
+        row = _int(tp_base) + offset
+        if not HAS_HQ_ITEMS or col_hq is None or not tp_base or not HAS_FILE_HQ_ITEM or not row:
+            return Z
+        return _safe_gen_formula(row, col_hq, "Sheet1", file_HQ_Item)
+
+    # ── HQ items formula block ────────────────────────────────────────────────
+    formula_hq_list = [fhq_item(o) for o in [5,3,6,10,18,21,22,26,4,34,1,20]]
+    valid_hq = [x[1:] for x in formula_hq_list if x != Z]
+    formula_hq_sum = f"=({' + '.join(valid_hq)}) / 1000000" if valid_hq else Z
+
+    # ── HQ Tagetik tax / operating profit ─────────────────────────────────────
+    def ftax(offset): return fhq_tgt(_int(tax_base) + _int(offset)) if tax_base else Z
+    def fop (offset): return fhq_tgt(_int(op_base)  + _int(offset)) if op_base  else Z
+
+    tax_parts = [x[1:] for x in [
+        ftax(3),ftax(1),ftax(20),ftax(4),ftax(22),ftax(6),
+        ftax(7),ftax(16),ftax(18),
+        fop(0),fop(1),fop(2),fop(3),
+    ] if x != Z]
+    formula_hq_tax_sum = f"=({' + '.join(tax_parts)}) / 1000000" if tax_parts else Z
+
+    # ── Template extract helper (gated on HAS_TMPL_MAN) ───────────────────────
+    def _ex(sheet, row, col, label=""):
+        row, col = _int(row), _int(col)
+        return (_safe_extract_formula(file_path_Template_man, sheet, row, col, label)
+                if HAS_TMPL_MAN else Z)
+
+    SH_TGT = "HQ Tagetik"
+    SH_REL = "New KPI Actual"
+
+    hq_ex_1 = _ex(SH_TGT, 46, col_hq_tgt, "hq_ex_1")
+    hq_ex_2 = _ex(SH_TGT, 47, col_hq_tgt, "hq_ex_2")
+    hq_ex_3 = _ex(SH_TGT, 48, col_hq_tgt, "hq_ex_3")
+    hq_ex_4 = _ex(SH_TGT, 49, col_hq_tgt, "hq_ex_4")
+
+    # ── NANO / UP calc ────────────────────────────────────────────────────────
+    _nano_raw = (
+        _safe_gen_formula(row_nano, col_nano, "Actual", file_paths_NANO_HFM)
+        if (HAS_NANO and HAS_FILE_NANO and row_nano and col_nano) else Z
+    )
+    f_nano = f"={_nano_raw[1:]}*10^3" if _nano_raw != Z else Z
+
+    _up_raw = _safe_gen_formula(18, 25, "UP_Calculation", file_paths_UP_Calc) if HAS_FILE_UP else Z
+    f_up    = f"={_up_raw[1:]}*10^6" if _up_raw != Z else Z
+
+    # energy_row is already int; safe arithmetic
+    _energy_offset = energy_row - tp_base
+    f_energy = fhq_item(_energy_offset) if (energy_row and tp_base) else Z
+
+    # ── OSP formulas ──────────────────────────────────────────────────────────
+    _osp1_row = _int(row_osp1) - 5 if (_int(row_osp1) > 5) else 0
+    _osp2_row = _int(row_osp2) - 5 if (_int(row_osp2) > 5) else 0
+
+    f_osp1_raw = (
+        _safe_gen_formula(_osp1_row, _int(col_osp1), "Master")
+        if (HAS_OSP and _osp1_row and col_osp1) else Z
+    )
+    f_osp2_raw = (
+        _safe_gen_formula(_osp2_row, _int(col_osp2), "Master")
+        if (HAS_OSP and _osp2_row and col_osp2) else Z
+    )
+    f_osp2 = f"=-{f_osp2_raw[1:]}" if f_osp2_raw != Z else Z
+
+    f_ex_249  = _ex(SH_REL, 249, (_int(col_KPI_write) - 1) if col_KPI_write is not None else 0, "f_ex_249")
+    f_249     = _safe_gen_formula_249(month_number, file_path_OSP) if HAS_FILE_OSP else Z
+    f_sum249  = _compound(f_249, "-", f_ex_249)
+
+    f_osp_ex1 = _ex(SH_REL, 239, (_int(col_KPI_write) - 1) if col_KPI_write is not None else 0, "f_osp_ex1")
+    f_osp_sum = _compound(f_osp1_raw, "-", f_osp_ex1)
+
+    # ── OCP (OCS details) ─────────────────────────────────────────────────────
+    f_ocp1    = focp(74)
+    f_ocp2    = focp(81)
+    f_ocp_ex1 = _ex(SH_REL, 482, (_int(col_KPI_write) - 1) if col_KPI_write is not None else 0, "ocp_ex1")
+    f_ocp_ex2 = _ex(SH_REL, 500, (_int(col_KPI_write) - 1) if col_KPI_write is not None else 0, "ocp_ex2")
+
+    _ocp_ab = " + ".join(x[1:] for x in [f_ocp1, f_ocp2] if x != Z)
+    f_sum_ocp1 = (f"={f_ocp_ex1[1:]}-({_ocp_ab})/10^6" if (f_ocp_ex1 != Z and _ocp_ab)
+                  else f_ocp_ex1 if f_ocp_ex1 != Z else Z)
+    f_sum_ocp2 = (f"={f_ocp_ex2[1:]}+({_ocp_ab})/10^6" if (f_ocp_ex2 != Z and _ocp_ab)
+                  else f_ocp_ex2 if f_ocp_ex2 != Z else Z)
+
+    # ── OSP TGK ───────────────────────────────────────────────────────────────
+    def _tgk(abs_row: int) -> str:
+        r = _int(abs_row) - 2
+        return (
+            _safe_gen_formula(r, col_osp_tgk, "Summary", file_paths_OSP_TGK)
+            if (HAS_FILE_TGK and r > 0 and col_osp_tgk) else Z
+        )
+    f_tgk1 = _tgk(6);  f_tgk2 = _tgk(13)
+    f_tgk3 = _tgk(20); f_tgk4 = _tgk(27)
+
+    # ── High Level Variance / Feuil1 ─────────────────────────────────────────
+    f_relief_1 = (
+        _safe_gen_formula(row_feuil, col_feuil, "Feuil1", file_paths_High_Level_Variance)
+        if (HAS_FEUIL and HAS_FILE_HLV and row_feuil and col_feuil) else Z
+    )
+
+    # ── Relief KD ─────────────────────────────────────────────────────────────
+    def _kd(abs_row: int, col_idx: int) -> str:
+        col = _int(kd_cols[col_idx]) if len(kd_cols) > col_idx else 0
+        return (
+            _safe_gen_formula(_int(abs_row), col, "vs 2+10", file_paths_Relief_KD)
+            if (HAS_RELIEF_KD and HAS_FILE_KD and abs_row and col) else Z
+        )
+
+    f_relief_2_raw = _kd(45, 0);  f_relief_3_raw = _kd(30, 0)
+    f_relief_4_raw = _kd(15, 0);  f_relief_5_raw = _kd(45, 1)
+    f_relief_6_raw = _kd(30, 1)
+
+    f_ex_rel1 = _ex("Relief", 80, col_Relief, "relief_ex_row80")
+    f_ex_rel5 = _ex("Relief", 87, col_Relief, "relief_ex_row87")
+
+    if month_number == 4:
+        f_relief_12 = f"={connectivity_var}"
+    else:
+        f_relief_12 = (
+            f"=({connectivity_var})-{f_ex_rel5[1:]}"
+            if f_ex_rel5 != Z else f"={connectivity_var}"
+        )
+
+    def _neg_div(raw: str, ex: str = Z, divisor: int = 1000) -> str:
+        if raw == Z: return Z
+        base = f"=-({raw[1:]}){f'/{divisor}'}"
+        return f"{base}-{ex[1:]}" if ex != Z else base
+
+    f_relief_2 = _neg_div(f_relief_2_raw, f_ex_rel1)
+    f_relief_3 = _neg_div(f_relief_3_raw)
+    f_relief_4 = _neg_div(f_relief_4_raw)
+    f_relief_5 = _neg_div(f_relief_5_raw)
+    f_relief_6 = _neg_div(f_relief_6_raw)
+
+    # ── ITP / Purchase Price ──────────────────────────────────────────────────
+    _itp_r = _int(itp_rows[0]) if itp_rows else 0
+    _itp_c = _int(itp_cols[0]) if itp_cols else 0
+    f_relief_9 = (
+        _safe_gen_formula(_itp_r, _itp_c, "BP25", file_paths_ITP)
+        if (HAS_ITP and HAS_FILE_ITP and _itp_r and _itp_c) else Z
+    )
+
+    _pp_raw = _safe_gen_formula(14, 10, "Summary pivot", file_paths_Purchase_Price) if HAS_FILE_PP else Z
+    f_relief_10 = f"=-({_pp_raw[1:]})/10^6" if _pp_raw != Z else Z
+
+    # ── UED ───────────────────────────────────────────────────────────────────
+    # formula_ued_raw previously called extract_value_formula_latest(file_path_P_L)
+    # which embedded an external file path in the formula string.
+    # The "P&L Actual" sheet is already present in the OUTPUT workbook itself,
+    # so we build a plain intra-workbook reference instead:
+    #   ='P&L Actual'!<col_letter>340
+    # This means:
+    #   - No cross-workbook file path → no broken link when source file is moved
+    #   - Excel resolves it instantly from the same workbook
+    #   - col_PL_write is 1-based (already +1 from col_PL_PL)
+    #     so get_column_letter(col_PL_write) gives the correct column letter
+    #
+    # Guard: col_PL_write must be > 0 (i.e. the month column was found).
+    # If not → Z so no invalid reference is written.
+    if col_PL_write is not None:
+        try:
+            import openpyxl.utils as _oxl_utils
+            _ued_col_letter = _oxl_utils.get_column_letter(_int(col_PL_write))
+            formula_ued_raw = f"='P&L Actual'!{_ued_col_letter}340"
+        except Exception as _e:
+            logger.warning(f"UED intra-wb ref build failed ({_e}) – using Z")
+            formula_ued_raw = Z
+    else:
+        logger.warning("[SKIP] UED: col_PL_write is None, cannot build intra-wb ref – using Z")
+        formula_ued_raw = Z
+
+    f_ued_tmpl = _ex("P&L Actual", 340, (_int(col_PL_write) - 1) if col_PL_write is not None else 0, "UED_template")
+    f_sum_UED  = (
+        f"=({formula_ued_raw[1:]}-{f_ued_tmpl[1:]})/1000"
+        if (formula_ued_raw != Z and f_ued_tmpl != Z) else Z
+    )
+
+    # ── MCCP ──────────────────────────────────────────────────────────────────
+    f_mccp1 = fmccp(208)
+    f_mccp2 = fmccp(322)
+
+    # ── KPI Relief formulas ───────────────────────────────────────────────────
+    # All row_rel_* are ints; arithmetic is safe.
+    f_kpi_1   = frel(row_rel_mz_imp)
+    f_kpi_2   = frel(row_rel_ga_imp)
+    f_kpi_3   = freclass(reclass_row)
+    f_kpi_4   = frel(row_rel_iln_nmuk)
+    f_kpi_4_1 = frel(_int(row_rel_iln_nmuk) + 1) if row_rel_iln_nmuk else Z
+    f_kpi_5   = frel(row_rel_itp_inf)
+    f_kpi_6   = frel(row_rel_err_mz)
+    f_kpi_7   = frel(row_rel_kd_nmuk)
+    f_kpi_8   = frel(row_rel_kd_nmgr)
+    f_kpi_9   = frel(row_rel_kd_nmisa)
+    f_kpi_10  = frel(row_rel_bat_nmuk)
+    f_kpi_11  = frel(row_rel_bat_nmisa)
+    f_kpi_111 = frel(_int(row_rel_ga_imp) + 1) if row_rel_ga_imp else Z
+    f_kpi_12  = frel(row_rel_cev)
+    f_kpi_13  = frel(row_rel_itp_nis)
+    f_kpi_14  = frel(row_rel_bat_cancel)
+    f_kpi_15  = frel(row_rel_err_wd5)
+    f_kpi_16  = frel(row_rel_top_daim)
+    f_kpi_17  = frel(row_rel_inf_fmi)
+    f_kpi_18  = frel(row_rel_recall)
+    f_kpi_conn= frel(row_rel_conn)
+
+    f_sum_kpi_1 = _join_sum(f_kpi_2, f_kpi_3)
+    f_sum_kpi_2 = _join_sum(f_kpi_4, f_kpi_4_1)
+    f_sum_kpi_3 = _join_sum(f_kpi_7, f_kpi_8, f_kpi_9, f_kpi_10, f_kpi_11)
+    f_sum_kpi_4 = _join_sum(f_kpi_conn, f_kpi_13)
+    f_sum_kpi_5 = _join_sum(f_kpi_14, f_kpi_15, f_kpi_16, f_kpi_17)
+
+    # ── Manufacturing other-adjustments ───────────────────────────────────────
+    f_sum_mfg_oth = _join_sum(fp(row_oth_adj_mfg), fp(row_others_mfg))
+
+    # ── OEM brand summations ──────────────────────────────────────────────────
+    def _oem_sum(i: int) -> str:
+        a = fp(_int(oem_std[i])) if (oem_std and len(oem_std) > i and oem_std[i]) else Z
+        b = fp(_int(oem_oth[i])) if (oem_oth and len(oem_oth) > i and oem_oth[i]) else Z
+        return _join_sum(a, b)
+
+    # ── G&A index helper ──────────────────────────────────────────────────────
+    def _idx(arr, i) -> str:
+        if not HAS_ROP_NE or not arr or len(arr) <= i: return Z
+        return fp(_int(arr[i])) if arr[i] else Z
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 4  –  CELL UPDATE TABLES
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 4: building cell update tables")
+
+    # All arithmetic here uses variables already guaranteed to be int.
+    def _c(col0): return _int(col0) + 1   # 0-based → 1-based
+
+    # ── Reclass ───────────────────────────────────────────────────────────────
+    col_rel_w = _c(_int(col_Reclass) + 1) if col_Reclass is not None else 1
+    upd_reclass = (
+        [
+            (reclass_row - 2, col_rel_w, Var_Converter),
+            (reclass_row + 1, col_rel_w, var_converter_bJPY),
+            (reclass_row + 2, col_rel_w, var_converter_mEUR),
+        ]
+        if (HAS_RECLASS and reclass_row) else []
+    )
+
+    # ── Relief ────────────────────────────────────────────────────────────────
+    col_rel_wr = _c(_int(col_Relief) + 1)
+    upd_relief = [
+        (78,  col_rel_wr, ePWR_var),
+        (75,  col_rel_wr, f_relief_1),
+        (80,  col_rel_wr, f_relief_2),
+        (81,  col_rel_wr, f_relief_3),
+        (82,  col_rel_wr, f_relief_4),
+        (83,  col_rel_wr, f_relief_5),
+        (84,  col_rel_wr, f_relief_6),
+        (87,  col_rel_wr, f_relief_12),
+        (95,  col_rel_wr, f_relief_9),
+        (96,  col_rel_wr, f_relief_10),
+    ]
+
+    # ── HQ Tagetik ────────────────────────────────────────────────────────────
+    col_hq_w = _c(_int(col_hq_tgt) + 1) if col_hq_tgt is not None else 1
+    # Guard: ALL four conditions must be true for ANY HQ item formula to fire.
+    # If any is missing the whole rows 9-44 block writes Z, preventing phantom
+    # cross-workbook references to a file that may not exist.
+    _hq_block_ok = bool(col_hq_tgt is not None and HAS_HQ_ITEMS
+                        and col_hq is not None and tp_base and HAS_FILE_HQ_ITEM)
+    upd_hq = (
+        [
+            *[(9 + i, col_hq_w,
+               fhq_item(i - 1) if _hq_block_ok else Z)
+              for i in range(36)],
+            (46, col_hq_w, hq_ex_1), (47, col_hq_w, hq_ex_2),
+            (48, col_hq_w, hq_ex_3), (49, col_hq_w, hq_ex_4),
+            (52, col_hq_w, f_nano),
+            (54, col_hq_w, f_up),
+            (67, col_hq_w, f_energy),
+            (69, col_hq_w, cafe_penalty_var),
+        ]
+        if col_hq_tgt is not None else []
+    )
+
+    # ── P&L Actual ────────────────────────────────────────────────────────────
+    col_pl = _c(_int(col_PL_write)) if col_PL_write is not None else 1
+    upd_pl = [
+        (5,  col_pl, fp(row_nissan_retail)),
+        (6,  col_pl, fp(row_infiniti_retail)),
+        (7,  col_pl, fp(row_datsun_retail)),
+        (9,  col_pl, fp(row_tiv)),
+        (10, col_pl, fp(row_ms_nissan)),
+        (11, col_pl, fp(row_ms_infiniti)),
+        (12, col_pl, fp(row_ms_datsun)),
+        (14, col_pl, fp(row_opening_stock)),
+        (15, col_pl, fp(row_nmuk)),
+        (16, col_pl, fp(row_nmisa)),
+        (17, col_pl, fp(row_nmgr)),
+        (19, col_pl, fp(row_purchase_vol)),
+        (20, col_pl, fp(row_total_in)),
+        (21, col_pl, fp(row_ew_nissan)),
+        (22, col_pl, fp(row_ew_infiniti)),
+        (23, col_pl, fp(row_ew_datsun)),
+        (25, col_pl, fp(row_exp_nissan)),
+        (26, col_pl, fp(row_exp_infiniti)),
+        (29, col_pl, fp(row_renault_trucks)),
+        (30, col_pl, fp(row_daimler)),
+        (31, col_pl, fp(row_renault)),
+        (32, col_pl, fp(row_gtr_idg)),
+        (34, col_pl, fp(row_captives)),
+        (36, col_pl, fp(row_scope_adj)),
+        (37, col_pl, fp(row_closing_stock)),
+        (10, 20, _safe_gen_formula(15, 18, SH) if HAS_ROP_NE else Z),
+        (11, 20, _safe_gen_formula(17, 18, SH) if HAS_ROP_NE else Z),
+        (12, 20, _safe_gen_formula(19, 18, SH) if HAS_ROP_NE else Z),
+        (39, col_pl, fp(row_nissan_nv)),   (40, col_pl, fp(row_nissan_bb)),
+        (42, col_pl, fp(row_infiniti_nv)), (43, col_pl, fp(row_infiniti_bb)),
+        (45, col_pl, fp(row_datsun_nv)),   (46, col_pl, fp(row_datsun_bb)),
+        (48, col_pl, fp(row_nissan_uc)),   (49, col_pl, fp(row_infiniti_uc)),
+        (52, col_pl, fp(row_nissan_as)),   (53, col_pl, fp(row_infiniti_as)),
+        (54, col_pl, fp(row_datsun_as)),
+        (57, col_pl, fp(row_exp_nis_t)),   (58, col_pl, fp(row_exp_inf_t)),
+        (60, col_pl, fmz(row_mz_x83)),    (61, col_pl, fmz(row_mz_trucks)),
+        (62, col_pl, fmz(row_mz_pp_inter)),(63, col_pl, fmz(row_mz_cant)),
+        (64, col_pl, fmz(row_mz_h4bu)),   (65, col_pl, fmz(row_mz_scrap)),
+        (66, col_pl, fmz(row_mz_bat)),    (69, col_pl, fmz(row_mz_others)),
+        (73, col_pl, fp(trn_nis_nv)), (74, col_pl, fp(cos_nis_nv)),
+        (76, col_pl, fp(vme_nis_nv)), (78, col_pl, fp(fmi_nis_nv)),
+        (81, col_pl, fp(trn_inf_nv)), (82, col_pl, fp(cos_inf_nv)),
+        (84, col_pl, fp(vme_inf_nv)), (86, col_pl, fp(fmi_inf_nv)),
+        (89, col_pl, fp(trn_dat_nv)), (90, col_pl, fp(cos_dat_nv)),
+        (92, col_pl, fp(vme_dat_nv)), (94, col_pl, fp(fmi_dat_nv)),
+        (105, col_pl, fp(trn_nis_uc)), (106, col_pl, fp(cos_nis_uc)),
+        (108, col_pl, fp(vme_nis_uc)), (110, col_pl, fp(fmi_nis_uc)),
+        (113, col_pl, fp(trn_dat_uc)), (114, col_pl, fp(cos_dat_uc)),
+        (116, col_pl, fp(vme_dat_uc)), (118, col_pl, fp(fmi_dat_uc)),
+        (137, col_pl, fp(trn_nis_as)), (138, col_pl, fp(cos_nis_as)),
+        (140, col_pl, fp(vme_nis_as)), (142, col_pl, fp(fmi_nis_as)),
+        (145, col_pl, fp(trn_inf_as)), (146, col_pl, fp(cos_inf_as)),
+        (148, col_pl, fp(vme_inf_as)), (150, col_pl, fp(fmi_inf_as)),
+        (153, col_pl, fp(trn_dat_as)), (154, col_pl, fp(cos_dat_as)),
+        (156, col_pl, fp(vme_dat_as)), (158, col_pl, fp(fmi_dat_as)),
+        (171, col_pl, fp(trn_nis_ex)), (172, col_pl, fp(cos_nis_ex)),
+        (174, col_pl, fp(vme_nis_ex)),
+        (178, col_pl, fp(trn_inf_ex)), (179, col_pl, fp(cos_inf_ex)),
+        (181, col_pl, fp(vme_inf_ex)), (183, col_pl, fp(fmi_inf_ex)),
+        (193, col_pl, fp(row_x83_rop)),       (194, col_pl, fp(row_f91r_rop)),
+        (195, col_pl, fp(row_pp_inter_rop)),  (196, col_pl, fp(row_cant_rop)),
+        (197, col_pl, fp(row_parts_ren_rop)), (198, col_pl, fp(row_bat_oth_rop)),
+        (199, col_pl, fp(row_scraps_rop)),    (200, col_pl, fp(row_pensions_rop)),
+        (203, col_pl, fp(row_others_rop)),
+        (206, col_pl, fp(row_materials)),    (207, col_pl, fp(row_bo_reduct)),
+        (208, col_pl, fp(row_renault_tp)),   (209, col_pl, fp(row_ic_kd)),
+        (210, col_pl, fp(row_inbound_fr)),   (211, col_pl, fp(row_inbound_duty)),
+        (212, col_pl, fp(row_inhouse_dl)),   (213, col_pl, fp(row_bat_nmuk_mfg)),
+        (217, col_pl, f_sum_mfg_oth),
+        (219, col_pl, fp(row_core_fixed)),   (220, col_pl, fp(row_pic_nissan)),
+        (221, col_pl, fp(row_regional_cost)),(222, col_pl, fp(row_vend_tool)),
+        (223, col_pl, fp(row_projects)),     (224, col_pl, fp(row_nesas)),
+        (225, col_pl, fp(row_bat_fixed)),    (226, col_pl, fp(row_inf_fixed_gd1a)),
+        (227, col_pl, fp(row_maint_dd)),     (228, col_pl, fp(row_gd1a_shift)),
+        (229, col_pl, fp(row_supp_claims)),
+        # row_supp_claims is int; +1 is always safe
+        (230, col_pl, fp(row_supp_claims + 1) if row_supp_claims else Z),
+        # OCS rows (37 consecutive cells starting at excel row 235)
+        # Uses _build_row_block() which applies a SINGLE four-condition gate:
+        #   ocs_base > 0   : search actually found the OCS section
+        #   HAS_ROP_NE     : source DataFrame is present
+        #   col_ROP_NE > 0 : month column was found in the DF
+        #   col_pl > 0     : destination column is valid
+        # When ANY condition fails → all 37 cells are written as Z ("=0").
+        # This prevents Excel from generating #REF when the source file or
+        # sheet section is unavailable.
+        *_build_row_block(
+            base_row        = _int(ocs_row[0]) if (ocs_row and ocs_row[0]) else 0,
+            col_write       = col_pl,
+            has_df          = HAS_ROP_NE,
+            col_source      = col_ROP_NE,
+            fp_fn           = fp,
+            zero_sentinel   = Z,
+            start_excel_row = 235,
+            count           = 37,
+        ),
+        # OEM brands
+        (275, col_pl, fp(_int(oem_trn[0])) if oem_trn and oem_trn[0] else Z),
+        (276, col_pl, _oem_sum(0)),
+        (277, col_pl, fp(_int(oem_mgn[0])) if oem_mgn and oem_mgn[0] else Z),
+        (278, col_pl, fp(_int(oem_veh[0])) if oem_veh and oem_veh[0] else Z),
+        (279, col_pl, fp(_int(oem_log[0])) if oem_log and oem_log[0] else Z),
+        (280, col_pl, fp(_int(oem_roy[0])) if oem_roy and oem_roy[0] else Z),
+        (282, col_pl, fp(_int(oem_trn[1])) if oem_trn and len(oem_trn)>1 and oem_trn[1] else Z),
+        (283, col_pl, _oem_sum(1)),
+        (284, col_pl, fp(_int(oem_mgn[1])) if oem_mgn and len(oem_mgn)>1 and oem_mgn[1] else Z),
+        (285, col_pl, fp(_int(oem_veh[1])) if oem_veh and len(oem_veh)>1 and oem_veh[1] else Z),
+        (286, col_pl, fp(_int(oem_log[1])) if oem_log and len(oem_log)>1 and oem_log[1] else Z),
+        (287, col_pl, fp(_int(oem_roy[1])) if oem_roy and len(oem_roy)>1 and oem_roy[1] else Z),
+        (289, col_pl, fp(_int(oem_trn[2])) if oem_trn and len(oem_trn)>2 and oem_trn[2] else Z),
+        (290, col_pl, _oem_sum(2)),
+        (291, col_pl, fp(_int(oem_mgn[2])) if oem_mgn and len(oem_mgn)>2 and oem_mgn[2] else Z),
+        (292, col_pl, fp(_int(oem_veh[2])) if oem_veh and len(oem_veh)>2 and oem_veh[2] else Z),
+        (293, col_pl, fp(_int(oem_log[2])) if oem_log and len(oem_log)>2 and oem_log[2] else Z),
+        (294, col_pl, fp(_int(oem_roy[2])) if oem_roy and len(oem_roy)>2 and oem_roy[2] else Z),
+        (304, col_pl, fp(row_func_rd)),    (305, col_pl, fp(row_nonfunc_rd)),
+        (307, col_pl, frd(row_func_rd_rev)),  (308, col_pl, frd(row_func_rd_cost)),
+        (309, col_pl, frd(row_nf_rd_rev)),    (310, col_pl, frd(row_nf_rd_cost)),
+        (313, col_pl, _idx(idx_labour,  0)), (314, col_pl, _idx(idx_is,       0)),
+        (315, col_pl, _idx(idx_dep,     0)), (316, col_pl, _idx(idx_prov,     0)),
+        (317, col_pl, _idx(idx_overhead,0)),
+        (319, col_pl, _idx(idx_labour,  1)), (320, col_pl, _idx(idx_is,       1)),
+        (321, col_pl, _idx(idx_dep,     1)), (322, col_pl, _idx(idx_prov,     1)),
+        (323, col_pl, _idx(idx_overhead,1)),
+        (325, col_pl, _idx(idx_labour,  2)), (326, col_pl, _idx(idx_is,       2)),
+        (327, col_pl, _idx(idx_dep,     2)), (328, col_pl, _idx(idx_prov,     2)),
+        (329, col_pl, _idx(idx_overhead,2)),
+        (338, col_pl, formula_hq_sum),
+        (339, col_pl, formula_hq_tax_sum),
+        (340, col_pl, f_sum_UED),
+    ]
+
+    # ── New KPI Actual ────────────────────────────────────────────────────────
+    col_kpi = _c(_int(col_KPI_write)) if col_KPI_write is not None else 1
+    upd_kpi = [
+        (42,  col_kpi, f_kpi_1),
+        (45,  col_kpi, f_sum_kpi_1),
+        (205, col_kpi, f_mccp1),
+        (239, col_kpi, f_osp_sum),
+        (249, col_kpi, f_sum249),
+        (263, col_kpi, f_osp2),
+        (319, col_kpi, f_mccp2),
+        (382, col_kpi, f_sum_kpi_2),
+        (383, col_kpi, f_kpi_6),
+        (384, col_kpi, f_sum_kpi_3),
+        (387, col_kpi, f_kpi_111),
+        (390, col_kpi, f_kpi_12),
+        (391, col_kpi, f_sum_kpi_4),
+        (394, col_kpi, f_sum_kpi_5),
+        (402, col_kpi, f_kpi_5),
+        (421, col_kpi, f_kpi_18),
+        (482, col_kpi, f_sum_ocp1),
+        (500, col_kpi, f_sum_ocp2),
+        (532, col_kpi, f_tgk1),
+        (533, col_kpi, f_tgk2),
+        (534, col_kpi, f_tgk3),
+    ]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 5  –  WRITE OUTPUT FILE
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 5: writing output file")
+
+    sheet_names = ["Reclass", "Relief", "HQ Tagetik", "P&L Actual", "New KPI Actual"]
+    all_updates = [upd_reclass, upd_relief, upd_hq, upd_pl, upd_kpi]
+
+    legacy_path, result_path = paste_values_KPI_PL(
+        file_path_Template, sheet_names, all_updates, month_number,
+        timestamped_output_path,
+    )
+    logger.info(f"P&L output written → {result_path}  ({time.time()-t0:.1f}s)")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  STEP 6  –  HAND OFF TO ACT
+    # ══════════════════════════════════════════════════════════════════════════
+    logger.info("Step 6: calling ACT")
+
+    ACT(
+        file_path_P_L, legacy_path,
+        df_P_L_ROP_NE, df_P_L_HQ,
+        file_path_OSP, df_OSP,
+        file_path_HMF, df_HMF_Managerial,
+        file_path_New_KPI, df_P_L_New_KPI,
+        file_HQ_Item, df_hQ_items,
+        file_goodwill,
+        df_r_and_d, df_MZ_conso, df_P_L_Relief,
+        df_P_L_PL, df_P_L_Reclass, df_P_L_MCCP, df_P_L_OCS,
+        df_New_KPI_CFMI, df_New_goodwill, df_Act,
+        df_1c_osp,
+        file_paths_High_Level_Variance, df_high_variance_feuil,
+        file_paths_Relief_KD, df_Relief_KD,
+        file_paths_Purchase_Price, df_Purchase_Price,
+        file_paths_UP_Calc, df_UP_Calc,
+        file_paths_NANO_HFM, df_nano_hfm,
+        file_paths_ITP, df_itp,
+        file_path_Template, file_path_Template_1,
+        month_number, Var_Converter, var_Cfmi,
+        file_path_Template_man_1, file_path_goodwill_template,
+        result_path, timestamped_output_path,
+    )
