@@ -1,0 +1,17 @@
+def _safe_transfer_price(df, name):
+    if not _df_ok(df, name): return [0]
+    try:    return _int_list(find_transfer_price_adjustment(df) or [0], f"transfer_price({name})")
+    except Exception as e:
+        logger.warning(f"find_transfer_price_adjustment({name}): {e}")
+        z_audit.record("EXCEPTION", str(e), f"find_transfer_price_adjustment({name})")
+        return [0]
+tp_list  = _safe_transfer_price(df_hQ_items, "df_hQ_items") if HAS_HQ_ITEMS else [0]
+    tp_base  = _int(tp_list[0]) if tp_list else 0
+def find_transfer_price_adjustment(df: pd.DataFrame) -> list[int]:
+    pat = re.sub(r"\s+", "", "nrv").lower()
+    df_lower = df.applymap(
+        lambda x: re.sub(r"\s+", "", x.lower()) if isinstance(x, str) else x
+    )
+    return df_lower[
+        df_lower.apply(lambda row: row.astype(str).str.contains(pat, regex=True).any(), axis=1)
+    ].index.tolist()
